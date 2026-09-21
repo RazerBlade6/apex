@@ -1,0 +1,15 @@
+# Build output
+/apex
+/dist/
+
+# Local databases (real state lives in ~/.apex, but keep strays out)
+*.db
+*.db-wal
+*.db-shm
+
+# Test / coverage
+*.out
+coverage.*
+
+# macOS
+.DS_Store
