@@ -188,10 +188,94 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	for _, m := range pending(all, applied) {
 		if err := s.applyOne(ctx, m); err != nil {
+			if detail := s.diagnose(ctx, m); detail != "" {
+				return &MigrationDataConflictError{
+					Version: m.Version, Name: m.Name, Detail: detail, Err: err,
+				}
+			}
 			return fmt.Errorf("migration %d (%s): %w", m.Version, m.Name, err)
 		}
 	}
 	return nil
+}
+
+// MigrationDataConflictError reports a migration that failed because the rows
+// already in the database violate the invariant it introduces.
+//
+// It is a distinct type because the response is different: a failed migration
+// is usually a bug in the migration, but this one is a data problem the user
+// fixes, and the message has to name the conflicting rows for that to be
+// possible.
+type MigrationDataConflictError struct {
+	Version int
+	Name    string
+	Detail  string
+	Err     error
+}
+
+func (e *MigrationDataConflictError) Error() string {
+	return fmt.Sprintf("migration %d (%s): %v\n%s", e.Version, e.Name, e.Err, e.Detail)
+}
+
+// UserFixable: the fix is to resolve the conflicting rows and rerun.
+func (e *MigrationDataConflictError) UserFixable() bool { return true }
+
+func (e *MigrationDataConflictError) Unwrap() error { return e.Err }
+
+// migrationDiagnostics maps a migration version to a function that explains a
+// failure in terms of the data that caused it.
+//
+// Only migrations that can fail against valid-until-now data need an entry.
+// The alternative — letting `UNIQUE constraint failed: projects.path` be the
+// whole message — names the column but not the rows, which is the half of the
+// answer the user cannot look up without opening SQLite themselves.
+var migrationDiagnostics = map[int]func(ctx context.Context, db *sql.DB) string{
+	2: duplicateProjectPaths,
+}
+
+// diagnose returns extra detail for a failed migration, or "" if there is
+// none to give. A diagnostic that itself fails is silently dropped: it exists
+// to improve an error message, never to replace one.
+func (s *Store) diagnose(ctx context.Context, m Migration) string {
+	fn, ok := migrationDiagnostics[m.Version]
+	if !ok {
+		return ""
+	}
+	return fn(ctx, s.db)
+}
+
+// duplicateProjectPaths names the projects that share a path, which is the
+// only way migration 002 can fail against an otherwise healthy database.
+func duplicateProjectPaths(ctx context.Context, db *sql.DB) string {
+	rows, err := db.QueryContext(ctx, `
+		SELECT path, COUNT(*) AS holders, GROUP_CONCAT(slug, ', ') AS slugs
+		FROM projects
+		GROUP BY path
+		HAVING COUNT(*) > 1
+		ORDER BY path`)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+
+	var b strings.Builder
+	for rows.Next() {
+		var (
+			path    string
+			holders int
+			slugs   string
+		)
+		if err := rows.Scan(&path, &holders, &slugs); err != nil {
+			return ""
+		}
+		fmt.Fprintf(&b, "  %d projects share the path %s: %s\n", holders, path, slugs)
+	}
+	if rows.Err() != nil || b.Len() == 0 {
+		return ""
+	}
+	b.WriteString("  path is a project's identity (DESIGN.md §6): each one may hold only one.\n")
+	b.WriteString("  remove the duplicate entry from PROJECTS.md and delete its row, then rerun.")
+	return b.String()
 }
 
 func (s *Store) bootstrap(ctx context.Context) error {

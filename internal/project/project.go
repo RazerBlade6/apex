@@ -200,11 +200,11 @@ func (e *SlugConflictError) UserFixable() bool { return true }
 //   - a row with this slug at another path has MOVED, and its path is updated;
 //   - otherwise the project is new.
 //
-// registered_at and last_synced_at are read from the matched row and written
-// back, because store.UpsertProject writes whatever last_synced_at it is handed
-// and a sync that refreshed no digest has no business clearing the time one
-// last was. (That footgun is logged as open in DESIGN.md §18; this is the
-// workaround, not the fix.)
+// registered_at is read from the matched row and written back: it records when
+// Apex first saw the project, and a re-registration is not a new one.
+// last_synced_at needs no such care since M3 — store.UpsertProject now
+// preserves it unless a caller explicitly sets it, which closes the footgun
+// DESIGN.md §18 logged as open.
 func Upsert(ctx context.Context, st *store.Store, c Candidate, status string, now time.Time) (UpsertResult, error) {
 	var result UpsertResult
 
@@ -292,10 +292,13 @@ func requireSlugFree(ctx context.Context, st *store.Store, c Candidate, from str
 	}
 }
 
-// carryForward preserves the fields a sync must not invent or clear.
+// carryForward preserves the fields a sync must not invent.
+//
+// last_synced_at is absent on purpose: leaving it nil is what tells
+// store.UpsertProject to keep whatever the row already had, so a sync that
+// refreshed no digest cannot move the timestamp in either direction.
 func carryForward(row *store.Project, existing store.Project, status string) {
 	row.RegisteredAt = existing.RegisteredAt
-	row.LastSyncedAt = existing.LastSyncedAt
 	if status == "" {
 		row.Status = existing.Status
 	}

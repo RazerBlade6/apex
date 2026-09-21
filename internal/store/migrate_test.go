@@ -316,3 +316,159 @@ func TestNoSelectStar(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 }
+
+// applyThrough applies migrations up to and including version n, leaving the
+// rest pending. It is how a test stands in a database that predates a
+// migration without hand-writing the schema.
+func applyThrough(t *testing.T, st *Store, n int) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.bootstrap(ctx); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	all, err := Migrations()
+	if err != nil {
+		t.Fatalf("Migrations: %v", err)
+	}
+	for _, m := range all {
+		if m.Version > n {
+			return
+		}
+		if err := st.applyOne(ctx, m); err != nil {
+			t.Fatalf("apply %03d_%s: %v", m.Version, m.Name, err)
+		}
+	}
+}
+
+func seedProjectAt(t *testing.T, st *Store, slug, path string) {
+	t.Helper()
+	err := st.UpsertProject(context.Background(), Project{
+		Slug: slug, Name: slug, Path: path, RegisteredAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("seed project %s: %v", slug, err)
+	}
+}
+
+// TestUniqueProjectPathApplies covers migration 002 against the database it
+// will actually meet: one with no duplicate paths in it.
+func TestUniqueProjectPathApplies(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+
+	status, err := st.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.Pending) != 0 {
+		t.Fatalf("%d migrations pending after Migrate", len(status.Pending))
+	}
+	var applied bool
+	for _, a := range status.Applied {
+		if a.Version == 2 {
+			applied = true
+		}
+	}
+	if !applied {
+		t.Fatalf("migration 002 is not in %+v", status.Applied)
+	}
+
+	// Two projects at two paths are fine.
+	seedProjectAt(t, st, "apex", "/tmp/apex")
+	seedProjectAt(t, st, "scholarrag", "/tmp/scholarrag")
+
+	// A second project at an occupied path is now refused by the schema,
+	// which is the whole point: path is identity (DESIGN.md §6), and until
+	// now only application code said so.
+	err = st.UpsertProject(ctx, Project{
+		Slug: "apex-cli", Name: "Apex CLI", Path: "/tmp/apex", RegisteredAt: time.Now(),
+	})
+	if err == nil {
+		t.Fatal("a second project was registered at an occupied path")
+	}
+	if !strings.Contains(strings.ToUpper(err.Error()), "UNIQUE") {
+		t.Errorf("err = %q, want a uniqueness violation", err)
+	}
+
+	// Moving a project onto a free path still works.
+	seedProjectAt(t, st, "apex", "/tmp/apex-moved")
+	got, err := st.GetProject(ctx, "apex")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if got.Path != "/tmp/apex-moved" {
+		t.Errorf("Path = %q, want the moved path", got.Path)
+	}
+}
+
+// TestUniqueProjectPathFailsLoudlyOnDuplicates is the case the migration is
+// allowed to fail in. Forward-only migrations have no rollback, so the
+// failure has to be loud, has to leave schema_migrations untouched, and has
+// to name the rows that caused it — none of which a bare "UNIQUE constraint
+// failed: projects.path" does.
+func TestUniqueProjectPathFailsLoudlyOnDuplicates(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	// A database as it stood before 002 existed.
+	applyThrough(t, st, 1)
+	seedProjectAt(t, st, "apex", "/tmp/apex")
+	seedProjectAt(t, st, "apex-cli", "/tmp/apex")
+	seedProjectAt(t, st, "atlas", "/tmp/atlas")
+
+	err := st.Migrate(ctx)
+	if err == nil {
+		t.Fatal("Migrate succeeded against duplicate paths")
+	}
+
+	var conflict *MigrationDataConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("err = %T (%v), want *MigrationDataConflictError", err, err)
+	}
+	if conflict.Version != 2 {
+		t.Errorf("Version = %d, want 2", conflict.Version)
+	}
+	if !conflict.UserFixable() {
+		t.Error("duplicate rows are the user's to resolve, not an internal failure")
+	}
+	// The message must name the conflict: the path, and both projects holding
+	// it. The project that is not in conflict must not be dragged in.
+	for _, want := range []string{"/tmp/apex", "apex", "apex-cli"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to name %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "/tmp/atlas") {
+		t.Errorf("err = %q, want it to name only the conflicting rows", err)
+	}
+	if !strings.Contains(strings.ToUpper(err.Error()), "UNIQUE") {
+		t.Errorf("err = %q, want the underlying database error kept", err)
+	}
+
+	// Nothing was recorded: a migration that failed must not look applied.
+	status, statusErr := st.Status(ctx)
+	if statusErr != nil {
+		t.Fatalf("Status: %v", statusErr)
+	}
+	for _, a := range status.Applied {
+		if a.Version == 2 {
+			t.Error("schema_migrations recorded a migration that failed")
+		}
+	}
+	if len(status.Pending) != 1 || status.Pending[0].Version != 2 {
+		t.Errorf("Pending = %+v, want migration 2 still outstanding", status.Pending)
+	}
+
+	// And the migration lock was released, so a rerun is not wedged.
+	if err := st.Migrate(ctx); err == nil {
+		t.Fatal("the second attempt succeeded; the duplicates are still there")
+	}
+
+	// Once the duplicate is gone, the same migration applies.
+	if _, err := st.DB().ExecContext(ctx, `DELETE FROM projects WHERE slug = ?`, "apex-cli"); err != nil {
+		t.Fatalf("remove duplicate: %v", err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate after resolving the conflict: %v", err)
+	}
+}

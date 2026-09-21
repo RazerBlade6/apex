@@ -426,10 +426,25 @@ every machine simultaneously.
 
 That yields four rules:
 
-**1. Additive only.** `CREATE TABLE`, `ADD COLUMN`, `CREATE INDEX`. Never `DROP`,
-never rename, never change a column type, never add a `NOT NULL` column without a
-default. A column an old binary does not know about is harmless; a column it
-expects and cannot find is a crash.
+**1. Additive only — but additive protects old _readers_, not old _writers_.**
+`CREATE TABLE`, `ADD COLUMN`, `CREATE INDEX`. Never `DROP`, never rename, never
+change a column type, never add a `NOT NULL` column without a default. A column an
+old binary does not know about is harmless; a column it expects and cannot find is
+a crash.
+
+The subtlety that "additive" hides: a `CREATE UNIQUE INDEX` or any new constraint
+**narrows the set of writes the schema accepts**. It is additive in DDL terms and
+still breaks an older binary that was happily performing a write the new constraint
+forbids. Since DDL forwards to the primary and is immediately global, one machine
+running `apex sync` can break another machine's writes without either user doing
+anything wrong.
+
+So: additive DDL needs no review for readers. **A constraint that narrows the
+accepted write set needs the same one-way-door review as a destructive change**,
+and should ship only once every machine runs a binary that already upholds the
+invariant in application code. Migration 002 (`UNIQUE` on `projects.path`) is safe
+precisely because M2 already matched registry entries by path — but the rule as
+originally written would not have told you to check that.
 
 **2. Never `SELECT *`.** Always name columns explicitly. This single rule is what
 makes additive migrations safe across binary versions — it is a lint-enforceable
@@ -534,7 +549,13 @@ type Request struct {
     Messages  []Message
     Model     string
     MaxTokens int
-    Effort    string // low|medium|high|xhigh|max; Anthropic only, ignored elsewhere
+    Effort    string // low|medium|high|xhigh|max. Applies to models that support
+                     // output_config.effort; ignored by providers and models that
+                     // do not. This is a per-MODEL axis, not per-vendor:
+                     // claude-haiku-4-5 — the model this spec recommends for the
+                     // digest slot — rejects both effort and adaptive thinking
+                     // with a 400. Taking the spec's own cost advice must not
+                     // produce an error.
 }
 
 type EventType int
@@ -549,6 +570,8 @@ type Usage struct {
     InputTokens      int
     OutputTokens     int
     CacheReadTokens  int
+    CacheWriteTokens int    // see below
+    Model            string // which model actually served this request
 }
 
 type Event struct {
@@ -572,6 +595,24 @@ type Provider interface {
 `Structured` is what generates action items and ideas — both are lists of typed
 records, not prose, and constraining them to a schema removes an entire class of
 parsing failure.
+
+**Schemas must target the intersection of both vendors' accepted subsets**, not
+arbitrary JSON Schema. In practice that means an object root, every property
+required, and `additionalProperties: false`. A schema that only one vendor accepts
+turns a config change into a runtime 400, so write to the intersection from the
+start rather than discovering the boundary after a provider switch.
+
+**`CacheWriteTokens` is not redundant with `CacheReadTokens`.** Watching reads alone
+cannot distinguish caching that works from a prefix just unstable enough to
+re-write the cache on every call — in that failure mode reads stay at zero and
+writes stay high, which is the expensive case, and it looks identical to "not
+cached yet" if only reads are recorded. Cache writes are billed at a premium, so
+this is the number that catches the mistake.
+
+**`Model` closes a gap in §7's schema.** `digests.model` and
+`action_items.generated_by` both record which model produced a row. Without the
+serving model on the response, Apex can only record what it *asked* for, which
+diverges the moment a fallback or an alias resolves to something else.
 
 ### Implementation notes
 
@@ -1038,9 +1079,12 @@ Settled 2026-09-21, previously open:
    every `.go` and `.sql` file and fails on a match outside comments. A test rather
    than a convention, which is what the guarantee needed.
 
-8. **`apex doctor` mutation** — closed. `apex sync` now carries the migration, so
-   `doctor` can become read-only and merely report pending migrations. Change it
-   when M3 next touches `cmd/apex`.
+8. **`apex doctor` mutation** — decided, not yet implemented. `doctor` must become
+   **read-only**: it reports `N pending` as a warning telling the user to run `apex
+   sync`, and `sync` owns migration. This is no longer hypothetical — during M3,
+   running `apex doctor` applied migration 002 to the real database with no prompt
+   and no mention in its own output. A command whose stated job is verifying the
+   environment performed a one-way schema change. Implement in M4.
 
 ### Still open
 

@@ -31,6 +31,14 @@ const (
 
 // UpsertProject inserts a project or updates the mutable fields of an existing
 // one. registered_at is preserved on update: it is when Apex first saw it.
+//
+// last_synced_at is preserved unless the caller explicitly sets it. It records
+// when digests were last refreshed (DESIGN.md §7), which is not something a
+// registry write knows anything about: an earlier version assigned it from
+// `excluded` unconditionally, so any caller that did not pre-read the row wiped
+// the column — logged as open in DESIGN.md §18 and fixed here rather than in
+// every caller. Clearing it back to NULL is deliberately not expressible; no
+// caller wants to, and MarkProjectSynced is how it is set.
 func (s *Store) UpsertProject(ctx context.Context, p Project) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO projects (`+projectColumns+`)
@@ -39,7 +47,7 @@ func (s *Store) UpsertProject(ctx context.Context, p Project) error {
 			name           = excluded.name,
 			path           = excluded.path,
 			status         = excluded.status,
-			last_synced_at = excluded.last_synced_at`,
+			last_synced_at = COALESCE(excluded.last_synced_at, projects.last_synced_at)`,
 		p.Slug, p.Name, p.Path, optText(p.Status),
 		formatTime(p.RegisteredAt), timeArg(p.LastSyncedAt))
 	if err != nil {
@@ -89,9 +97,10 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 //
 // A project's identity is its path, not its name (DESIGN.md §6): the slug
 // derives from the name, so matching by slug alone would turn a rename into a
-// second row and orphan the first along with its cached digest. Paths are not
-// unique by schema, so the lowest slug wins deterministically if two rows ever
-// share one.
+// second row and orphan the first along with its cached digest. Migration 002
+// makes the path unique at the schema level; the ordering here is kept for a
+// database read before that migration has been applied, where the lowest slug
+// wins deterministically rather than arbitrarily.
 func (s *Store) GetProjectByPath(ctx context.Context, path string) (Project, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT `+projectColumns+` FROM projects WHERE path = ? ORDER BY slug LIMIT 1`, path)

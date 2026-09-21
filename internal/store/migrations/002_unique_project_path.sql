@@ -1,0 +1,18 @@
+-- 002_unique_project_path: make path the enforced identity of a project.
+--
+-- DESIGN.md §6 says a project's identity is its path, not its name, and M2
+-- made `apex sync` match registry entries by path first. Nothing at the schema
+-- level said so, which left the invariant resting entirely on application code
+-- getting it right every time.
+--
+-- Additive and forward-only per §7: an index is not a DROP, a rename, or a
+-- type change, and a binary that predates it keeps working unchanged.
+--
+-- This migration CAN fail, and that is correct. Against a database that
+-- already holds two projects at one path, it aborts and nothing is recorded in
+-- schema_migrations — the transaction in applyOne covers both. There is
+-- deliberately no IF NOT EXISTS here and no partial index papering over the
+-- duplicates: a real conflict must stop the migration loudly rather than be
+-- silently tolerated, and the migrator adds a diagnostic naming the paths and
+-- the projects that collide.
+CREATE UNIQUE INDEX idx_projects_path ON projects(path);
