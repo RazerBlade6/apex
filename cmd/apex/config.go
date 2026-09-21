@@ -47,22 +47,34 @@ from. Key values are never printed.`,
 				fmt.Fprintln(out)
 			}
 
-			fmt.Fprintln(out, "# api keys")
+			// Credentials, not only keys: a claude-cli route is satisfied by
+			// the CLI's own login and has nothing for Apex to resolve
+			// (DESIGN.md §13). It appears here so the table answers "is this
+			// route satisfied", rather than being silently absent.
+			fmt.Fprintln(out, "# credentials")
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "# PROVIDER\tSOURCE\tORIGIN")
-			for _, provider := range config.ValidProviders {
-				key, err := config.ResolveKey(ctx, provider)
+			for _, name := range config.ValidProviders {
+				if !config.UsesAPIKey(name) {
+					// No subprocess is run here: `apex config` prints what is
+					// configured, and `apex doctor` is what checks whether
+					// the CLI is actually logged in.
+					fmt.Fprintf(tw, "# %s\t%s\t%s\n",
+						name, config.CredentialSubscription, "claude auth status (see apex doctor)")
+					continue
+				}
+				key, err := config.ResolveKey(ctx, name)
 				if err != nil {
 					var missing *config.MissingKeyError
 					if errors.As(err, &missing) {
 						fmt.Fprintf(tw, "# %s\t%s\t%s or $%s\n",
-							provider, "not found", missing.Service, missing.EnvVar)
+							name, "not found", missing.Service, missing.EnvVar)
 						continue
 					}
 					return err
 				}
 				// key.Value() is deliberately never printed.
-				fmt.Fprintf(tw, "# %s\t%s\t%s\n", provider, key.Source, key.Origin)
+				fmt.Fprintf(tw, "# %s\t%s\t%s\n", name, key.Source, key.Origin)
 			}
 			return tw.Flush()
 		},

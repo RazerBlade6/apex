@@ -18,6 +18,7 @@ import (
 
 	"github.com/RazerBlade6/apex/internal/config"
 	"github.com/RazerBlade6/apex/internal/provider"
+	"github.com/RazerBlade6/apex/internal/provider/claudecli"
 	"github.com/RazerBlade6/apex/internal/provider/registry"
 	"github.com/RazerBlade6/apex/internal/store"
 )
@@ -124,10 +125,14 @@ missing and how to fix it. Exits non-zero if anything required is broken.
 Silently assuming the environment is the failure mode this project most wants
 to avoid, so doctor is specific rather than reassuring.
 
-By default nothing here talks to a model API: a key that exists is reported as
-present, which is not the same as reported as working. --probe makes one
-minimal, deliberately cheap request per configured provider to find out which
-it is. That request costs money, so it is opt-in.`,
+By default nothing here talks to a model API: a credential that exists is
+reported as present, which is not the same as reported as working. --probe
+makes one minimal, deliberately cheap request per configured provider to find
+out which it is. That request costs money, so it is opt-in.
+
+For a claude-cli route the cost is not money but session quota, which is
+shared with your own Claude Code usage, so --probe spends a little of what you
+may want for real work.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r := runDoctor(cmd.Context(), opts)
@@ -144,7 +149,7 @@ it is. That request costs money, so it is opt-in.`,
 	}
 
 	cmd.Flags().BoolVar(&opts.probe, "probe", false,
-		"make one minimal API call per configured provider to verify the key actually works")
+		"make one minimal call per configured provider to verify the credential actually works")
 	return cmd
 }
 
@@ -165,9 +170,13 @@ type doctorOptions struct {
 
 	// newProvider overrides how a provider is constructed for --probe. Tests
 	// point it at an httptest server; nil means the real registry, which
-	// resolves the key from the keychain or the environment and talks to the
-	// vendor.
+	// resolves the credential and talks to the vendor.
 	newProvider func(ctx context.Context, route config.ModelRoute) (provider.Provider, error)
+
+	// claudeBin overrides the claude binary the subscription checks run.
+	// Tests point it at a fake; empty means the real one, looked up on PATH
+	// and then in the directories its installer uses.
+	claudeBin string
 }
 
 func runDoctor(ctx context.Context, opts doctorOptions) *report {
@@ -197,6 +206,7 @@ func runDoctor(ctx context.Context, opts doctorOptions) *report {
 	cfg := checkConfig(ctx, r)
 	if cfg != nil {
 		checkKeys(ctx, r, cfg)
+		checkClaudeAuth(ctx, r, cfg, opts)
 		checkStore(ctx, r, cfg)
 		if opts.probe {
 			checkProbe(ctx, r, cfg, opts)
@@ -342,7 +352,11 @@ func checkKeys(ctx context.Context, r *report, cfg *config.Config) {
 		inUse[p] = true
 	}
 
-	for _, provider := range config.ValidProviders {
+	// Only the providers that actually have a key. A claude-cli route has
+	// none, and reporting it here as "not in the keychain" would send the
+	// user to add a key nothing would ever read (DESIGN.md §13). Its
+	// credential is checked by checkClaudeAuth instead.
+	for _, provider := range config.KeyProviders() {
 		name := provider + " key"
 		key, err := config.ResolveKey(ctx, provider)
 		if err == nil {
@@ -368,6 +382,62 @@ func checkKeys(ctx context.Context, r *report, cfg *config.Config) {
 		} else {
 			r.warn(name, detail+" (not referenced by config)", fix)
 		}
+	}
+}
+
+// usesClaudeCLI reports whether any model route is subscription-backed.
+func usesClaudeCLI(cfg *config.Config) bool {
+	for _, name := range cfg.Providers() {
+		if name == claudecli.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// checkClaudeAuth verifies the credential behind a claude-cli route
+// (DESIGN.md §13).
+//
+// It runs only when a route actually uses it, because a user on API keys
+// should not be told about a CLI login they do not need. Three states are
+// kept apart, since they have three different fixes: the CLI is not
+// installed, it is installed but logged out, or it is logged in. A fourth is
+// reported as a warning — logged in, but with an API key rather than the
+// subscription, which means a route chosen to spend subscription quota is
+// quietly spending money instead.
+//
+// Nothing here reads the credential. `claude auth status` reports that one
+// exists and which account it belongs to; the OAuth token itself never enters
+// Apex's process.
+func checkClaudeAuth(ctx context.Context, r *report, cfg *config.Config, opts doctorOptions) {
+	if !usesClaudeCLI(cfg) {
+		return
+	}
+	const name = "claude auth"
+
+	status, err := claudecli.Auth(ctx, opts.claudeBin)
+	if err != nil {
+		var perr *provider.Error
+		if errors.As(err, &perr) && perr.Kind == provider.KindUnavailable {
+			r.fail(name, perr.Message,
+				"install the Claude Code CLI and ensure it is on PATH\n"+
+					fmt.Sprintf("a route in %s is set to provider = %q, which runs inference through it", cfg.Path(), claudecli.Name))
+			return
+		}
+		r.fail(name, err.Error(), "check that `claude auth status --json` runs and prints JSON")
+		return
+	}
+
+	switch {
+	case !status.LoggedIn:
+		r.fail(name, "the claude CLI is installed but not logged in",
+			"run: claude auth login\n"+
+				"apex never reads or stores that credential; it only checks that the CLI has one")
+	case !status.Subscription():
+		r.warn(name, status.Describe()+"; this is not a claude.ai subscription login",
+			fmt.Sprintf("a claude-cli route exists to spend subscription quota, and this login would bill an API account instead\nrun: claude auth login\nor set the route back to provider = \"anthropic\" in %s", cfg.Path()))
+	default:
+		r.ok(name, status.Describe())
 	}
 }
 
@@ -469,7 +539,11 @@ func checkProbe(ctx context.Context, r *report, cfg *config.Config, opts doctorO
 		newProvider = func(ctx context.Context, route config.ModelRoute) (provider.Provider, error) {
 			// No retries: a 429 is a finding to report, not something to sit
 			// through the SDK's backoff for.
-			return registry.New(ctx, route, registry.WithMaxRetries(0))
+			buildOpts := []registry.Option{registry.WithMaxRetries(0)}
+			if opts.claudeBin != "" {
+				buildOpts = append(buildOpts, registry.WithBinary(opts.claudeBin))
+			}
+			return registry.New(ctx, route, buildOpts...)
 		}
 	}
 
@@ -478,15 +552,7 @@ func checkProbe(ctx context.Context, r *report, cfg *config.Config, opts doctorO
 
 		p, err := newProvider(ctx, route)
 		if err != nil {
-			var missing *config.MissingKeyError
-			if errors.As(err, &missing) {
-				r.fail(name, fmt.Sprintf("no key to probe with: not in %s or $%s",
-					missing.Service, missing.EnvVar),
-					fmt.Sprintf("security add-generic-password -s %s -a %s -w\nor: export %s=...\nthen rerun apex doctor --probe",
-						missing.Service, config.KeychainUser, missing.EnvVar))
-				continue
-			}
-			r.fail(name, err.Error(), fmt.Sprintf("check models.*.provider in %s", cfg.Path()))
+			reportProbeSetupFailure(r, name, cfg, err)
 			continue
 		}
 
@@ -539,11 +605,41 @@ func probeOnce(ctx context.Context, p provider.Provider, route config.ModelRoute
 	return usage, err
 }
 
+// reportProbeSetupFailure explains a provider that could not even be built.
+//
+// The three reasons are different problems with different fixes: no API key
+// for a key-based route, no claude binary for a subscription route, and a
+// provider name this build does not implement.
+func reportProbeSetupFailure(r *report, name string, cfg *config.Config, err error) {
+	var missing *config.MissingKeyError
+	if errors.As(err, &missing) {
+		r.fail(name, fmt.Sprintf("no key to probe with: not in %s or $%s",
+			missing.Service, missing.EnvVar),
+			fmt.Sprintf("security add-generic-password -s %s -a %s -w\nor: export %s=...\nthen rerun apex doctor --probe",
+				missing.Service, config.KeychainUser, missing.EnvVar))
+		return
+	}
+	var perr *provider.Error
+	if errors.As(err, &perr) && perr.Kind == provider.KindUnavailable {
+		r.fail(name, "nothing to probe with: "+perr.Message,
+			"install the Claude Code CLI and ensure it is on PATH")
+		return
+	}
+	r.fail(name, err.Error(), fmt.Sprintf("check models.*.provider in %s", cfg.Path()))
+}
+
 // reportProbeFailure turns a classified provider error into the line the user
 // acts on.
 func reportProbeFailure(r *report, name string, route config.ModelRoute, cfg *config.Config, err error) {
 	service, envVar, locErr := config.CredentialLocation(route.Provider)
-	if locErr != nil {
+
+	// A subscription route has no keychain entry and no environment
+	// variable, so every message below has to be phrased for the credential
+	// it actually has. Telling the user to add an API key would send them to
+	// fix the wrong thing (DESIGN.md §13).
+	var keyless *config.KeylessProviderError
+	subscription := errors.As(locErr, &keyless)
+	if locErr != nil && !subscription {
 		service, envVar = "the keychain", "the environment"
 	}
 
@@ -555,9 +651,31 @@ func reportProbeFailure(r *report, name string, route config.ModelRoute, cfg *co
 
 	switch perr.Kind {
 	case provider.KindAuth:
+		if subscription {
+			r.fail(name, "the claude CLI rejected the request for lack of a credential: "+perr.Message,
+				"run: claude auth login\nthen rerun apex doctor --probe")
+			return
+		}
 		r.fail(name, fmt.Sprintf("key rejected (HTTP %d): %s", perr.StatusCode, perr.Message),
 			fmt.Sprintf("the key resolved for %s is present but not accepted\nreplace it: security add-generic-password -U -s %s -a %s -w\nor correct $%s",
 				route.Provider, service, config.KeychainUser, envVar))
+	case provider.KindUnavailable:
+		r.fail(name, perr.Message,
+			"install the Claude Code CLI and ensure it is on PATH")
+	case provider.KindSessionLimit:
+		// Deliberately not the rate-limit line. A session limit is not a
+		// per-minute API cap that clears in seconds: the window is shared
+		// with the user's own Claude Code sessions, and the honest advice is
+		// about where to spend the quota, not about waiting a moment.
+		detail := "subscription session limit reached: " + perr.Message
+		if !perr.ResetsAt.IsZero() {
+			detail = fmt.Sprintf("subscription session limit reached, resets %s: %s",
+				perr.ResetsAt.Format(time.RFC3339), perr.Message)
+		}
+		r.fail(name, detail,
+			"this is NOT an API rate limit; the credential works and the subscription window is spent\n"+
+				"the same window serves your own Claude Code sessions, so apex has been using quota you may want back\n"+
+				fmt.Sprintf("wait for the reset, or route the high-volume slots to an API key in %s:\n  [models.digest] provider = \"anthropic\"", cfg.Path()))
 	case provider.KindRateLimit:
 		r.warn(name, fmt.Sprintf("rate limited (HTTP %d): the key is valid, the account is over its limit", perr.StatusCode),
 			"wait and rerun; --probe deliberately does not retry, so this is the provider's answer and not a timeout")
@@ -566,10 +684,10 @@ func reportProbeFailure(r *report, name string, route config.ModelRoute, cfg *co
 			"check connectivity and any proxy; the key was never sent anywhere")
 	case provider.KindCancelled:
 		r.fail(name, fmt.Sprintf("no answer within %s", probeTimeout),
-			"rerun when the provider is responding; nothing here proves the key is wrong")
+			"rerun when the provider is responding; nothing here proves the credential is wrong")
 	case provider.KindRequest:
 		r.fail(name, fmt.Sprintf("request rejected (HTTP %d): %s", perr.StatusCode, perr.Message),
-			fmt.Sprintf("the key was accepted and the request was not\ncheck models.*.model in %s: %q must be an exact model id",
+			fmt.Sprintf("the credential was accepted and the request was not\ncheck models.*.model in %s: %q must be a model id this provider accepts",
 				cfg.Path(), route.Model))
 	case provider.KindServer:
 		r.warn(name, fmt.Sprintf("provider error (HTTP %d): %s", perr.StatusCode, perr.Message),

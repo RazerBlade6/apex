@@ -614,6 +614,14 @@ this is the number that catches the mistake.
 serving model on the response, Apex can only record what it *asked* for, which
 diverges the moment a fallback or an alias resolves to something else.
 
+> **Both fields are specified here but not yet implemented — M4 must add them.**
+> This stopped being hypothetical during M3.5: a trivial `say hi` through the CLI
+> reported **16,440 cache-creation tokens and zero cache reads** — exactly the
+> expensive pattern this section warns about — and Apex had nowhere to put the
+> number. The CLI also hands over the serving model in `modelUsage` for free. Two
+> fields, three adapters, and it gets more expensive the longer M4 logs without
+> them.
+
 ### Implementation notes
 
 - **Do not write the adapters from memory.** Both SDKs move quickly. Consult the
@@ -663,6 +671,115 @@ All three default to `claude-opus-5`. The `digest` slot is the intended place to
 downgrade — `claude-haiku-4-5` is the natural choice there, since summarizing a
 README and a git log is not intelligence-bound — but that is a user decision, not
 a default.
+
+### Subscription-backed inference (`claude-cli`)
+
+A user with a Claude Pro or Max subscription can run the advisor loop through it
+instead of an API key. This needs **no interface change**: `internal/provider/claudecli`
+is a third `Provider` implementation that shells out to the `claude` CLI, exactly as
+`ClaudeCodeExecutor` does for the builder loop. It is the same pattern applied one
+layer up — Apex owns the judgment, an existing tool owns the transport.
+
+```
+claude -p \
+  --output-format stream-json --include-partial-messages --verbose \
+  --system-prompt <identity + digests> \
+  --model opus --effort high \
+  --restricted --strict-mcp-config --disable-slash-commands \
+  --tools "" --no-session-persistence \
+  [--json-schema <schema>]        # Structured() only
+```
+
+Verified against `claude` 2.1.278 on 2026-09-21. Three flags were added to this
+block during M3.5, each for a reason worth keeping:
+
+- **`--verbose` is mandatory.** Without it the CLI refuses outright — "When
+  using `--print`, `--output-format=stream-json` requires `--verbose`" — before
+  any inference happens. It does not make the stream chattier in this mode.
+- **`--tools ""` disables every built-in tool.** `--restricted` removes the
+  code-running tools but leaves Read, Write and Edit available, and an advisor
+  call has no business editing files in whatever directory `apex` was launched
+  from. v1 has no tool use at all, so the honest setting is none.
+- **`--no-session-persistence`** keeps advisor prompts — which carry
+  `PROFILE.md`, `SKILLS.md` and every digest — out of `~/.claude/projects`.
+  Apex never resumes these sessions, so a transcript would only be a second,
+  unmanaged copy of the user's context.
+
+`--json-schema` covers `Structured`; `stream-json` covers `Stream`. Auth state is
+readable via `claude auth status --json`, which is what `doctor` checks: it
+reports `loggedIn`, `authMethod` (`claude.ai` for a subscription) and
+`subscriptionType`, and never the credential itself.
+
+> **Never pass `--bare`.** It reads as the obvious flag for using Claude Code as a
+> raw inference engine — skip hooks, CLAUDE.md discovery, plugins — but its own help
+> states that Anthropic auth then becomes "strictly `ANTHROPIC_API_KEY` or
+> `apiKeyHelper`; OAuth and keychain are never read." It disables the exact
+> mechanism this provider exists to use. `--restricted` is the correct isolation
+> flag: it strips the code-running tools and ignores user/project settings files
+> while leaving auth working normally.
+
+**The binding constraint is quota contention, not cost.** A subscription session
+limit is shared with the user's real Claude Code usage. If Apex exhausts it
+refreshing digests, the user cannot use Claude Code for actual work until it
+resets. An API key has no such coupling. Per-slot routing makes this a config
+decision:
+
+```toml
+[models.advisor]          # judgment-heavy, low volume
+provider = "claude-cli"   # subscription
+model    = "opus"         # CLI aliases (opus/sonnet) or a full model id
+effort   = "high"
+
+[models.digest]           # bulk, mechanical, high volume
+provider = "anthropic"    # API key — do not spend session quota here
+model    = "claude-opus-5"
+effort   = "low"
+```
+
+**Every route requires a `model`**, including `claude-cli` ones; `Config.Validate`
+rejects a route without it. Earlier drafts of this section showed a `claude-cli`
+route with no model, which would not have loaded.
+
+`apex doctor --probe` was run against a live Pro subscription on 2026-09-21 and
+returned `claude-cli probe  sonnet answered (2 input, 4 output tokens)`, confirming
+the full production argv above — `--tools ""` and `--no-session-persistence`
+included — actually executes rather than merely parsing.
+
+Two consequences follow from it being a subprocess. Each call pays process startup,
+so parallel digest refresh needs a **bounded worker pool**, not one process per
+project. And its exhaustion mode is a *session* limit, which is not an API 429 and
+must not be reported as one.
+
+**Session-limit detection is only half-verified, by construction.** The CLI emits a
+structured `rate_limit_event` carrying `status`, `resetsAt` and window utilisation
+— but only its `"allowed"` form has ever been observed, because seeing the
+exhausted form requires exhausting the window. The implementation therefore reads a
+non-permissive status *only on a run that already failed*, so an unobserved
+soft-warning value cannot turn a working call into a false session limit, and falls
+back to matching the CLI's error text otherwise. Those text patterns are an
+educated guess. The failure mode is "reported as unknown with the CLI's own message
+quoted" rather than "silently wrong" — acceptable, but not the same as verified.
+**If this limit is ever hit in practice, capture the `result` event's exact text**;
+it is the single most valuable missing fixture in the codebase.
+
+`KindSessionLimit` is deliberately **not** retryable. The request would succeed
+eventually, but hours later, and a digest loop treating it as retryable would spin.
+
+M3.5 added two `provider.Kind` values for failures no HTTP-backed adapter can
+produce: `KindSessionLimit` and `KindUnavailable` (the CLI is not installed).
+`KindSessionLimit` is deliberately **not** `Retryable()`: the request would
+succeed eventually, but the window resets in hours, and a caller that treats it
+as retryable would spin. The reset time, when the CLI reports one, is on
+`Error.ResetsAt`.
+
+Two limitations of the subprocess transport are real and recorded rather than
+hidden. `Request.MaxTokens` has no CLI flag and is ignored — the CLI decides the
+output limit from the model. And multi-turn history is flattened into one
+prompt string; the CLI's `--input-format stream-json` would be faithful, but it
+turns a one-shot subprocess into a protocol, and only M6's chat view needs it.
+
+OpenAI has no supported equivalent. ChatGPT Plus exposes no programmatic API, and
+driving the web API directly violates its terms. OpenAI remains API-key-only.
 
 ---
 
@@ -913,11 +1030,24 @@ may import it — that boundary is what keeps a v2 non-terminal frontend possibl
 
 `~/.apex/config.toml` holds model routing, executor choice, and preferences.
 
-**Keys are never stored in config.** Resolution order:
+**Apex resolves _credentials_, not only keys.** A model route is satisfied either
+by an API key or by a subscription-backed CLI, and `doctor` must report which.
+
+For key-based providers (`anthropic`, `openai`), keys are never stored in config:
 
 1. macOS Keychain (`apex:anthropic`, `apex:openai`) via `go-keyring`
 2. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` environment variables
 3. Fail with an explicit message naming what is missing and how to set it
+
+A Keychain **error** (locked, access denied) is not the same as a secret being
+absent — fall through to the environment rather than failing outright.
+
+For `claude-cli`, there is no key to resolve. Its credential check is the binary
+being present and `claude auth status` reporting a logged-in account. Apex never
+reads, stores, or forwards the underlying OAuth credential; it only observes that
+the CLI has one. A route configured for `claude-cli` must therefore never be
+reported as "missing API key" — that message would send the user to fix the wrong
+thing.
 
 A Keychain **error** (locked, access denied) is not the same as a secret being
 **absent**. On error, fall through to the environment variable rather than failing
@@ -1036,6 +1166,7 @@ Each milestone is independently verifiable.
 | M1 | Skeleton | Cobra CLI, config, keychain, `store.Backend`, migrations (§7), `lock` pkg (§10), `apex doctor` |
 | M2 | Context | Markdown + frontmatter parsing, registry sync, git introspection |
 | M3 | Providers | Anthropic and OpenAI adapters, streaming, structured output |
+| M3.5 | Subscription provider | `claudecli` provider, credential model, `doctor` auth check |
 | M4 | Advisor | Digest generation, `apex review`, `apex ideas`, `apex items` |
 | M5 | Executor | `Executor` interface, `ClaudeCodeExecutor`, `apex do`, `apex start` |
 | M6 | TUI | Bubble Tea chat, items, and projects views |
@@ -1088,6 +1219,18 @@ Settled 2026-09-21, previously open:
 
 ### Still open
 
+- **Quota contention is documented but not enforced.** §8 warns that routing the
+  bulk `digest` slot at `claude-cli` can exhaust the session window needed for real
+  Claude Code work — yet a config doing exactly that passes `doctor` with exit 0. A
+  warn on `models.digest.provider == "claude-cli"` costs nothing and fires on
+  precisely the configuration the spec tells you not to write. Add in M4.
+- **`doctor` resolves the `claude` binary twice, two different ways.** The M1
+  executor check has its own lookup; `claudecli.LookPath` is a second. They agree
+  today. M5 should collapse the executor onto the provider's lookup so they cannot
+  drift.
+- **`--probe` is cheap, not free, for `claude-cli`.** The API adapters bound the
+  probe with `max_tokens: 16`; the CLI has no equivalent flag, so a subscription
+  probe generates a full short reply against the user's window.
 - **`store.UpsertProject` clears `last_synced_at`.** Its `ON CONFLICT` sets the
   column from `excluded`, so any caller that does not pre-read the row silently
   wipes it. `project.Upsert` works around this; fix it at the source in M3 or M4

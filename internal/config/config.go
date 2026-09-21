@@ -74,7 +74,9 @@ var (
 	ValidBackends  = []string{"local", "turso"}
 	ValidSyncModes = []string{"explicit", "on_start", "scheduled"}
 	ValidSchedules = []string{"daily", "weekly"}
-	ValidProviders = []string{"anthropic", "openai"}
+	// ValidProviders includes claude-cli, the subscription-backed provider
+	// (DESIGN.md §8). It has no API key: see CredentialKindOf.
+	ValidProviders = []string{"anthropic", "openai", "claude-cli"}
 	ValidEfforts   = []string{"low", "medium", "high", "xhigh", "max"}
 	ValidExecutors = []string{"claudecode"}
 )
@@ -253,6 +255,11 @@ func writeFile(path string, c *Config) error {
 const configHeader = `# Apex configuration. See DESIGN.md.
 # API keys are NEVER stored here: they live in the macOS Keychain
 # (apex:anthropic, apex:openai) or in ANTHROPIC_API_KEY / OPENAI_API_KEY.
+#
+# A route may instead set provider = "claude-cli" to run through a Claude Pro
+# or Max subscription. It needs no key; it needs the claude CLI installed and
+# logged in (claude auth login). Its quota is shared with your own Claude Code
+# usage, so the high-volume digest slot is usually better on an API key.
 
 `
 

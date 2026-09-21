@@ -160,3 +160,72 @@ func TestKeyNeverPrintsItsValue(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeCLIHasNoAPIKeyToResolve is the §13 guarantee for M3.5: a route
+// configured for the subscription-backed provider must never be reported as
+// missing an API key, because that message sends the user to the keychain to
+// add a key nothing would ever read.
+func TestClaudeCLIHasNoAPIKeyToResolve(t *testing.T) {
+	keyring.MockInit()
+
+	kind, err := CredentialKindOf("claude-cli")
+	if err != nil {
+		t.Fatalf("CredentialKindOf: %v", err)
+	}
+	if kind != CredentialSubscription {
+		t.Errorf("kind = %q, want %q", kind, CredentialSubscription)
+	}
+	if UsesAPIKey("claude-cli") {
+		t.Error("UsesAPIKey(claude-cli) = true")
+	}
+
+	_, err = ResolveKey(context.Background(), "claude-cli")
+	var keyless *KeylessProviderError
+	if !errors.As(err, &keyless) {
+		t.Fatalf("err = %T (%v), want *KeylessProviderError", err, err)
+	}
+	var missing *MissingKeyError
+	if errors.As(err, &missing) {
+		t.Fatal("a claude-cli route produced a MissingKeyError; §13 forbids exactly this")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "keychain") {
+		t.Errorf("err = %q, want no advice about the keychain", err)
+	}
+
+	if _, _, err := CredentialLocation("claude-cli"); !errors.As(err, &keyless) {
+		t.Errorf("CredentialLocation error = %T, want *KeylessProviderError", err)
+	}
+}
+
+// TestKeyProvidersExcludesSubscriptionProviders keeps the tables in `apex
+// doctor` and `apex config` free of a key column for a provider with no key.
+func TestKeyProvidersExcludesSubscriptionProviders(t *testing.T) {
+	got := KeyProviders()
+	want := []string{"anthropic", "openai"}
+	if len(got) != len(want) {
+		t.Fatalf("KeyProviders() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("KeyProviders() = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestKeyBasedProvidersAreUnchanged is the M1-M3 regression guard: the
+// generalisation to credentials must not alter how a key-based route
+// resolves.
+func TestKeyBasedProvidersAreUnchanged(t *testing.T) {
+	for _, name := range []string{"anthropic", "openai"} {
+		if !UsesAPIKey(name) {
+			t.Errorf("UsesAPIKey(%q) = false", name)
+		}
+		service, envVar, err := CredentialLocation(name)
+		if err != nil {
+			t.Fatalf("CredentialLocation(%q): %v", name, err)
+		}
+		if service == "" || envVar == "" {
+			t.Errorf("CredentialLocation(%q) = %q, %q; want both populated", name, service, envVar)
+		}
+	}
+}

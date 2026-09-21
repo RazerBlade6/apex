@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 // Kind classifies a provider failure.
@@ -33,6 +34,31 @@ const (
 	KindNetwork
 	// KindCancelled is the caller's context ending, not a failure at all.
 	KindCancelled
+
+	// KindSessionLimit is a subscription session limit (DESIGN.md §8,
+	// "Subscription-backed inference"). It is emphatically *not* a 429.
+	//
+	// A 429 says one API account sent too many requests per minute and will
+	// be fine in seconds. A session limit says the rolling usage window of a
+	// Claude Pro or Max subscription is exhausted, it resets hours from now,
+	// and — the part that matters — that window is shared with the user's own
+	// Claude Code sessions. Reporting it as a rate limit would tell the user
+	// to wait a moment, when the real message is that Apex has consumed quota
+	// the user needs for their own work.
+	//
+	// Only claude-cli can produce it; the key-based adapters never do.
+	KindSessionLimit
+
+	// KindUnavailable is a provider whose local transport is not installed:
+	// claude-cli's binary is missing from PATH. No key-based adapter can
+	// produce it, since an HTTP client is always present.
+	//
+	// This is an addition to the taxonomy M3 established. A subprocess-backed
+	// provider has a failure mode HTTP-backed ones do not: the thing that
+	// would carry the request does not exist on this machine. Folding it into
+	// KindNetwork would tell the user to check connectivity; folding it into
+	// KindRequest would send them to config.toml. Both are the wrong fix.
+	KindUnavailable
 )
 
 func (k Kind) String() string {
@@ -49,12 +75,22 @@ func (k Kind) String() string {
 		return "network"
 	case KindCancelled:
 		return "cancelled"
+	case KindSessionLimit:
+		return "session_limit"
+	case KindUnavailable:
+		return "unavailable"
 	default:
 		return "unknown"
 	}
 }
 
 // Retryable reports whether the same request could succeed if sent again.
+//
+// KindSessionLimit is deliberately *not* retryable even though the request
+// would eventually succeed. Retryable here means "worth trying again now",
+// and the callers that read it — M4's digest refresh among them — would
+// otherwise spin against a window that resets hours later. The reset time is
+// on Error.ResetsAt for anything that wants to schedule around it.
 func (k Kind) Retryable() bool {
 	switch k {
 	case KindRateLimit, KindServer, KindNetwork:
@@ -77,6 +113,12 @@ type Error struct {
 	StatusCode int    // 0 when no HTTP response arrived
 	Message    string // vendor error body, truncated
 	Err        error
+
+	// ResetsAt is when a limited account may try again. It is zero unless the
+	// provider actually reported a reset time, which today only claude-cli
+	// does (its stream carries a rate_limit_event with the window's reset).
+	// Nothing infers it: an invented reset time would be worse than none.
+	ResetsAt time.Time
 }
 
 func (e *Error) Error() string {
@@ -84,6 +126,9 @@ func (e *Error) Error() string {
 	fmt.Fprintf(&b, "%s %s: %s", e.Provider, e.Op, e.Kind)
 	if e.StatusCode != 0 {
 		fmt.Fprintf(&b, " (HTTP %d)", e.StatusCode)
+	}
+	if !e.ResetsAt.IsZero() {
+		fmt.Fprintf(&b, " (resets %s)", e.ResetsAt.Format(time.RFC3339))
 	}
 	switch {
 	case e.Message != "":

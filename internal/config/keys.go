@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -17,6 +18,27 @@ type KeySource string
 const (
 	SourceKeychain KeySource = "keychain"
 	SourceEnv      KeySource = "env"
+)
+
+// CredentialKind says how a provider proves who it is.
+//
+// DESIGN.md §13 was generalised for M3.5: Apex resolves *credentials*, not
+// only keys. A route is satisfied either by an API key or by a
+// subscription-backed CLI that already holds its own OAuth credential, and
+// the difference is not cosmetic — it decides what `doctor` tells the user to
+// go and fix. A claude-cli route reported as "missing API key" would send
+// them to the keychain to add a key that this provider would never read.
+type CredentialKind string
+
+const (
+	// CredentialAPIKey is a key Apex resolves and passes to an SDK.
+	CredentialAPIKey CredentialKind = "api_key"
+
+	// CredentialSubscription is a credential Apex never sees. The claude CLI
+	// holds a Claude Pro or Max OAuth token in its own keychain entry; Apex
+	// neither reads, stores, nor forwards it, and only observes — through
+	// `claude auth status` — that the CLI has one.
+	CredentialSubscription CredentialKind = "subscription"
 )
 
 // KeychainUser is the account name stored under each keychain service. Apex is
@@ -74,15 +96,22 @@ func (e *MissingKeyError) UserFixable() bool { return true }
 
 func (e *MissingKeyError) Unwrap() error { return e.Cause }
 
-// providerCredential describes where a provider's key lives.
+// providerCredential describes how a provider is authenticated, and for a
+// key-based one, where its key lives.
 type providerCredential struct {
-	service string
-	envVar  string
+	kind    CredentialKind
+	service string // keychain service; empty for a subscription provider
+	envVar  string // environment fallback; empty for a subscription provider
 }
 
 var credentials = map[string]providerCredential{
-	"anthropic": {service: "apex:anthropic", envVar: "ANTHROPIC_API_KEY"},
-	"openai":    {service: "apex:openai", envVar: "OPENAI_API_KEY"},
+	"anthropic": {kind: CredentialAPIKey, service: "apex:anthropic", envVar: "ANTHROPIC_API_KEY"},
+	"openai":    {kind: CredentialAPIKey, service: "apex:openai", envVar: "OPENAI_API_KEY"},
+	// The claude CLI authenticates itself. Apex has nothing to resolve here,
+	// which is exactly why this entry exists: without it, claude-cli would
+	// fall through to UnknownProviderError and every caller would have to
+	// special-case it.
+	"claude-cli": {kind: CredentialSubscription},
 }
 
 // UnknownProviderError is an internal error: the caller asked for a provider
@@ -90,21 +119,86 @@ var credentials = map[string]providerCredential{
 type UnknownProviderError struct{ Provider string }
 
 func (e *UnknownProviderError) Error() string {
-	return fmt.Sprintf("unknown provider %q (known: anthropic, openai)", e.Provider)
+	return fmt.Sprintf("unknown provider %q (known: %s)", e.Provider, strings.Join(knownProviders(), ", "))
+}
+
+func knownProviders() []string {
+	out := make([]string, 0, len(credentials))
+	for name := range credentials {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// KeylessProviderError reports an API key being asked for on behalf of a
+// provider that has none.
+//
+// It is deliberately not a MissingKeyError. A caller that cannot tell the two
+// apart prints "no claude-cli API key found — set it in the keychain", which
+// is advice for a key that would never be read (DESIGN.md §13).
+type KeylessProviderError struct {
+	Provider string
+	Kind     CredentialKind
+}
+
+func (e *KeylessProviderError) Error() string {
+	return fmt.Sprintf("provider %q authenticates by %s and has no API key to resolve", e.Provider, e.Kind)
+}
+
+// CredentialKindOf reports how a provider authenticates.
+func CredentialKindOf(provider string) (CredentialKind, error) {
+	c, ok := credentials[provider]
+	if !ok {
+		return "", &UnknownProviderError{Provider: provider}
+	}
+	return c.kind, nil
+}
+
+// UsesAPIKey reports whether a provider is authenticated with a key Apex
+// resolves. An unknown provider reports false, so a caller that skips key
+// resolution for it will fail later with a better message than "no key".
+func UsesAPIKey(provider string) bool {
+	c, ok := credentials[provider]
+	return ok && c.kind == CredentialAPIKey
+}
+
+// KeyProviders lists the providers that have an API key to resolve, sorted.
+// It is what `apex doctor` and `apex config` iterate when reporting key
+// sources, so a subscription provider never appears in a table of keys.
+func KeyProviders() []string {
+	out := make([]string, 0, len(credentials))
+	for name, c := range credentials {
+		if c.kind == CredentialAPIKey {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // CredentialLocation returns the keychain service and environment variable
 // consulted for a provider, for display by `apex doctor`.
+//
+// A subscription provider has neither, and says so with a
+// *KeylessProviderError rather than two empty strings a caller might print.
 func CredentialLocation(provider string) (service, envVar string, err error) {
 	c, ok := credentials[provider]
 	if !ok {
 		return "", "", &UnknownProviderError{Provider: provider}
+	}
+	if c.kind != CredentialAPIKey {
+		return "", "", &KeylessProviderError{Provider: provider, Kind: c.kind}
 	}
 	return c.service, c.envVar, nil
 }
 
 // ResolveKey finds the API key for a provider, in the order given by
 // DESIGN.md §13: keychain first, environment second, explicit error third.
+//
+// A provider that authenticates some other way comes back as
+// *KeylessProviderError, never as *MissingKeyError. Callers that resolve a
+// credential rather than a key should branch on UsesAPIKey first.
 func ResolveKey(ctx context.Context, provider string) (Key, error) {
 	if err := ctx.Err(); err != nil {
 		return Key{}, err
@@ -112,6 +206,9 @@ func ResolveKey(ctx context.Context, provider string) (Key, error) {
 	cred, ok := credentials[provider]
 	if !ok {
 		return Key{}, &UnknownProviderError{Provider: provider}
+	}
+	if cred.kind != CredentialAPIKey {
+		return Key{}, &KeylessProviderError{Provider: provider, Kind: cred.kind}
 	}
 
 	secret, keychainErr := keyring.Get(cred.service, KeychainUser)

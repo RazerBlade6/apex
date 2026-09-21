@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/RazerBlade6/apex/internal/config"
 	"github.com/RazerBlade6/apex/internal/provider"
 	"github.com/RazerBlade6/apex/internal/provider/anthropic"
+	"github.com/RazerBlade6/apex/internal/provider/claudecli"
 	"github.com/RazerBlade6/apex/internal/provider/openai"
 )
 
@@ -189,5 +192,55 @@ func TestNewRefusesAnUnknownProviderBeforeTouchingTheKeychain(t *testing.T) {
 	var unknown *UnknownProviderError
 	if !errors.As(err, &unknown) {
 		t.Fatalf("err = %T (%v), want *UnknownProviderError", err, err)
+	}
+}
+
+// fakeClaude writes a script that stands in for the claude binary, so the
+// registry can be tested without the real CLI or its quota.
+func fakeClaude(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	return path
+}
+
+// TestNewClaudeCLIResolvesNoKey is the registry half of DESIGN.md §13's
+// credential model: a subscription-backed route must be constructible with an
+// empty keychain and no environment variables, and must never come back as a
+// missing key.
+func TestNewClaudeCLIResolvesNoKey(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	p, err := New(context.Background(),
+		config.ModelRoute{Provider: claudecli.Name, Model: "opus", Effort: "high"},
+		WithBinary(fakeClaude(t)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if p.Name() != claudecli.Name {
+		t.Errorf("Name() = %q, want %q", p.Name(), claudecli.Name)
+	}
+}
+
+func TestNewClaudeCLIReportsAMissingBinaryAsUnavailable(t *testing.T) {
+	keyring.MockInit()
+
+	_, err := New(context.Background(),
+		config.ModelRoute{Provider: claudecli.Name, Model: "opus"},
+		WithBinary(filepath.Join(t.TempDir(), "absent")))
+	if err == nil {
+		t.Fatal("New succeeded with no claude binary")
+	}
+	var missing *config.MissingKeyError
+	if errors.As(err, &missing) {
+		t.Fatal("a missing claude binary was reported as a missing API key")
+	}
+	var perr *provider.Error
+	if !errors.As(err, &perr) || perr.Kind != provider.KindUnavailable {
+		t.Fatalf("err = %v, want an unavailable-kind provider error", err)
 	}
 }

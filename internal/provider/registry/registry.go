@@ -18,6 +18,7 @@ import (
 	"github.com/RazerBlade6/apex/internal/config"
 	"github.com/RazerBlade6/apex/internal/provider"
 	"github.com/RazerBlade6/apex/internal/provider/anthropic"
+	"github.com/RazerBlade6/apex/internal/provider/claudecli"
 	"github.com/RazerBlade6/apex/internal/provider/openai"
 )
 
@@ -26,6 +27,7 @@ import (
 var constructors = map[string]func(provider.Config) (provider.Provider, error){
 	anthropic.Name: func(cfg provider.Config) (provider.Provider, error) { return anthropic.New(cfg) },
 	openai.Name:    func(cfg provider.Config) (provider.Provider, error) { return openai.New(cfg) },
+	claudecli.Name: func(cfg provider.Config) (provider.Provider, error) { return claudecli.New(cfg) },
 }
 
 // Names lists the providers this build supports, sorted.
@@ -68,6 +70,14 @@ func WithMaxRetries(n int) Option {
 	return func(c *provider.Config) { c.MaxRetries = &n }
 }
 
+// WithBinary overrides the executable a subprocess-backed provider runs. It
+// is WithBaseURL's counterpart for claude-cli: tests point it at a fake, and
+// a user whose claude lives off PATH can point it at the real one. The
+// HTTP-backed adapters ignore it.
+func WithBinary(path string) Option {
+	return func(c *provider.Config) { c.Binary = path }
+}
+
 // Build constructs a provider from an explicit configuration. It resolves no
 // credentials: the caller supplies the key.
 func Build(name string, cfg provider.Config) (provider.Provider, error) {
@@ -92,18 +102,27 @@ func Build(name string, cfg provider.Config) (provider.Provider, error) {
 //
 // A missing key comes back as *config.MissingKeyError, whose message already
 // names both places Apex looked.
+//
+// Not every route has a key. DESIGN.md §13 was generalised in M3.5: Apex
+// resolves credentials, and claude-cli's credential is one the CLI already
+// holds. Resolution is therefore skipped for it rather than attempted and
+// forgiven — attempting it would produce a "missing API key" error for a
+// route that will never read a key, which is the one message §13 says must
+// never appear.
 func New(ctx context.Context, route config.ModelRoute, opts ...Option) (provider.Provider, error) {
 	if _, ok := constructors[route.Provider]; !ok {
 		return nil, &UnknownProviderError{Provider: route.Provider, Known: Names()}
 	}
-	key, err := config.ResolveKey(ctx, route.Provider)
-	if err != nil {
-		return nil, err
-	}
 	cfg := provider.Config{
-		APIKey: key.Value(),
 		Model:  route.Model,
 		Effort: route.Effort,
+	}
+	if config.UsesAPIKey(route.Provider) {
+		key, err := config.ResolveKey(ctx, route.Provider)
+		if err != nil {
+			return nil, err
+		}
+		cfg.APIKey = key.Value()
 	}
 	for _, opt := range opts {
 		opt(&cfg)

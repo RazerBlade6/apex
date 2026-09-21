@@ -128,6 +128,16 @@ type Config struct {
 	// in Apex sets it in production.
 	BaseURL string
 
+	// Binary overrides the executable a subprocess-backed provider runs. It
+	// is the claude-cli analogue of BaseURL — tests point it at a fake, and
+	// nothing in Apex sets it in production — with one difference: a user
+	// whose claude lives somewhere unusual has a legitimate reason to set it,
+	// which is why it is config rather than a test-only hook.
+	//
+	// Empty means the adapter looks the binary up itself. HTTP-backed
+	// adapters ignore it.
+	Binary string
+
 	// Model and Effort are the defaults from the [models.*] entry, used for
 	// any Request that does not name its own.
 	Model  string
