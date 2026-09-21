@@ -88,7 +88,15 @@ func TestStreamHappyPath(t *testing.T) {
 	if usage == nil {
 		t.Fatal("EventDone carried no usage")
 	}
-	want := provider.Usage{InputTokens: 11, OutputTokens: 14, CacheReadTokens: 7}
+	// CacheWriteTokens and Model are M4 additions (DESIGN.md §8). The cache
+	// write is the number that distinguishes working caching from a prefix
+	// re-written on every call, and the model is what actually served the
+	// run rather than the alias that was asked for.
+	want := provider.Usage{
+		InputTokens: 11, OutputTokens: 14,
+		CacheReadTokens: 7, CacheWriteTokens: 16440,
+		Model: "claude-opus-5",
+	}
 	if *usage != want {
 		t.Errorf("usage = %+v, want %+v", *usage, want)
 	}

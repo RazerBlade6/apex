@@ -47,6 +47,17 @@ type Store struct {
 type Sync struct {
 	Mode     string `toml:"mode"`     // explicit | on_start | scheduled
 	Schedule string `toml:"schedule"` // daily | weekly; read only when mode = scheduled
+
+	// DigestWorkers bounds how many digests `apex sync` generates at once.
+	//
+	// This is an addition to §13, and it exists because of §8: a claude-cli
+	// route is a subprocess per call, so one goroutine per project would
+	// start one `claude` per project. The cost is not only CPU — the
+	// subscription window is shared with the user's own Claude Code sessions,
+	// and a twelve-project portfolio refreshing at full width is the fastest
+	// way to spend it. The default is deliberately small; a user on an API
+	// key can raise it.
+	DigestWorkers int `toml:"digest_workers"`
 }
 
 // Executor selects the builder-loop dispatch target (DESIGN.md §9).
@@ -81,6 +92,15 @@ var (
 	ValidExecutors = []string{"claudecode"}
 )
 
+// Digest worker bounds. The default is conservative on purpose: see
+// Sync.DigestWorkers. The ceiling is not a performance judgement but a
+// guardrail — beyond it a sync is contending with the machine and, on a
+// subscription route, with the user's own session window.
+const (
+	DefaultDigestWorkers = 2
+	MaxDigestWorkers     = 16
+)
+
 // Default returns the built-in configuration. Every model slot defaults to
 // claude-opus-5 (DESIGN.md §8): downgrading the digest slot is a user decision,
 // not a default.
@@ -97,8 +117,9 @@ func Default() Config {
 			SyncInterval: "5m",
 		},
 		Sync: Sync{
-			Mode:     "explicit",
-			Schedule: "daily",
+			Mode:          "explicit",
+			Schedule:      "daily",
+			DigestWorkers: DefaultDigestWorkers,
 		},
 		Executor: Executor{
 			Default: "claudecode",
@@ -331,6 +352,10 @@ func (c *Config) Validate() []error {
 
 	if err := oneOf("sync.mode", c.Sync.Mode, ValidSyncModes); err != nil {
 		errs = append(errs, err)
+	}
+	if c.Sync.DigestWorkers < 1 || c.Sync.DigestWorkers > MaxDigestWorkers {
+		errs = append(errs, fmt.Errorf("sync.digest_workers = %d is not between 1 and %d",
+			c.Sync.DigestWorkers, MaxDigestWorkers))
 	}
 	if c.Sync.Mode == "scheduled" {
 		if err := oneOf("sync.schedule", c.Sync.Schedule, ValidSchedules); err != nil {

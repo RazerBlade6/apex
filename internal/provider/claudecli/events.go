@@ -81,11 +81,14 @@ type line struct {
 	// on the run captured above; decoding it as one unconditionally would
 	// turn any other shape into a parse failure at exactly the moment — a
 	// failed run — when the message matters most.
-	Result         json.RawMessage `json:"result"`
-	Usage          *cliUsage       `json:"usage"`
-	APIErrorStatus *int            `json:"api_error_status"`
-	TerminalReason string          `json:"terminal_reason"`
-	StopReason     string          `json:"stop_reason"`
+	Result json.RawMessage `json:"result"`
+	Usage  *cliUsage       `json:"usage"`
+	// ModelUsage is the per-model cost breakdown, keyed by the model id the
+	// CLI billed. Only its keys are read; the values are left undecoded.
+	ModelUsage     map[string]json.RawMessage `json:"modelUsage"`
+	APIErrorStatus *int                       `json:"api_error_status"`
+	TerminalReason string                     `json:"terminal_reason"`
+	StopReason     string                     `json:"stop_reason"`
 }
 
 // apiEvent is the Anthropic streaming event the CLI passes through verbatim
@@ -115,15 +118,15 @@ type contentBlock struct {
 
 // cliUsage is the token accounting the CLI reports.
 //
-// CacheCreationInputTokens has no home in provider.Usage as M3 defined it —
-// the struct has InputTokens, OutputTokens and CacheReadTokens and nothing
-// else — so it is decoded and dropped. That is a real loss and is recorded in
-// the milestone notes rather than papered over: DESIGN.md §8 argues cache
-// *writes* are the number that catches an unstable prefix, and this provider
-// can see them.
+// CacheCreationInputTokens now has a home: M4 added provider.Usage's
+// CacheWriteTokens, so the 16,440 cache-creation tokens the capture above
+// reported for a trivial prompt are carried rather than dropped. DESIGN.md §8
+// argues cache *writes* are the number that catches an unstable prefix, and
+// this provider is the one that can see them most clearly.
 //
-// The CLI also reports total_cost_usd and a per-model breakdown. Neither has
-// a field on provider.Usage, and neither is invented into one.
+// The CLI also reports total_cost_usd. It has no field on provider.Usage and
+// is not invented into one. modelUsage is read separately, as a fallback for
+// the serving model.
 type cliUsage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
@@ -208,16 +211,37 @@ func (l *line) text() string {
 	return string(l.Result)
 }
 
-// usage converts the CLI's accounting to Apex's.
+// usage converts the CLI's accounting to Apex's. Usage.Model is left empty
+// here and filled by invoke from the serving model the run reported, which no
+// single usage block carries.
 func (u *cliUsage) usage() provider.Usage {
 	if u == nil {
 		return provider.Usage{}
 	}
 	return provider.Usage{
-		InputTokens:     u.InputTokens,
-		OutputTokens:    u.OutputTokens,
-		CacheReadTokens: u.CacheReadInputTokens,
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  u.CacheReadInputTokens,
+		CacheWriteTokens: u.CacheCreationInputTokens,
 	}
+}
+
+// servingModel returns the model a result event's modelUsage breakdown names.
+//
+// The init and message events normally say it first and this never has to run.
+// It exists for the case they do not: modelUsage is keyed by the model id the
+// CLI actually billed, so it answers the question DESIGN.md §8 asks Model to
+// answer — which model served this — even when nothing earlier in the stream
+// did. More than one key means the run was served by more than one model, and
+// naming one of them would be a guess, so it reports nothing.
+func (l *line) servingModel() string {
+	if len(l.ModelUsage) != 1 {
+		return ""
+	}
+	for name := range l.ModelUsage {
+		return name
+	}
+	return ""
 }
 
 // tailBufferMax bounds what is kept from a child's stderr. A CLI that fails

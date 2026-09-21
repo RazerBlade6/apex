@@ -438,6 +438,9 @@ func (p *Provider) invoke(ctx context.Context, op string, args []string, emit fu
 			if u := ln.Usage; u != nil {
 				out.usage = u.usage()
 			}
+			if out.model == "" {
+				out.model = copied.servingModel()
+			}
 			out.result = ln.text()
 		}
 
@@ -456,6 +459,13 @@ func (p *Provider) invoke(ctx context.Context, op string, args []string, emit fu
 	waitErr := cmd.Wait()
 
 	out.text = body.String()
+	// Every usage block the CLI emits is anonymous; the serving model is
+	// reported separately, by the init, message_start and assistant events and
+	// by the result event's modelUsage. Stamping it here means Usage.Model
+	// carries what actually served the run rather than the alias that was
+	// asked for — "opus" resolves to a dated id, and DESIGN.md §7 records the
+	// model on every digest and action item.
+	out.usage.Model = out.model
 	if perr := classify(ctx, op, out, resultLn, limit, waitErr, scanErr, &stderr); perr != nil {
 		return nil, perr
 	}

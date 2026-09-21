@@ -207,6 +207,7 @@ func runDoctor(ctx context.Context, opts doctorOptions) *report {
 	if cfg != nil {
 		checkKeys(ctx, r, cfg)
 		checkClaudeAuth(ctx, r, cfg, opts)
+		checkDigestRoute(ctx, r, cfg)
 		checkStore(ctx, r, cfg)
 		if opts.probe {
 			checkProbe(ctx, r, cfg, opts)
@@ -470,35 +471,80 @@ func checkStore(ctx context.Context, r *report, cfg *config.Config) {
 		return
 	}
 
-	if err := st.Migrate(ctx); err != nil {
-		fix := "rerun once the other migrator finishes"
-		if errors.Is(err, store.ErrOfflineMigration) {
-			fix = "reconnect: applying a migration requires writing to the primary"
-		}
-		r.fail("migrations", err.Error(), fix)
-		return
-	}
-
+	// doctor is READ-ONLY (DESIGN.md §18). It used to call st.Migrate here,
+	// which meant that during M3 a plain `apex doctor` applied migration 002
+	// to the real database with no prompt and no mention of having done so —
+	// a command whose entire job is verifying the environment performing a
+	// one-way, forward-only schema change. Pending migrations are reported;
+	// `apex sync` applies them.
 	status, err := st.Status(ctx)
 	if err != nil {
 		r.fail("migrations", err.Error(), "")
 		return
 	}
-	if len(status.Pending) > 0 {
-		names := make([]string, 0, len(status.Pending))
-		for _, m := range status.Pending {
-			names = append(names, fmt.Sprintf("%03d_%s", m.Version, m.Name))
-		}
-		r.fail("migrations", "pending after migrating: "+strings.Join(names, ", "), "rerun apex doctor")
-		return
-	}
-	detail := fmt.Sprintf("%d applied, 0 pending", len(status.Applied))
+	detail := fmt.Sprintf("%d applied", len(status.Applied))
 	if n := len(status.Applied); n > 0 {
 		last := status.Applied[n-1]
 		detail += fmt.Sprintf(" (latest %03d_%s, %s)",
 			last.Version, last.Name, last.AppliedAt.Format(time.RFC3339))
 	}
-	r.ok("migrations", detail)
+
+	if len(status.Pending) > 0 {
+		names := make([]string, 0, len(status.Pending))
+		for _, m := range status.Pending {
+			names = append(names, fmt.Sprintf("%03d_%s", m.Version, m.Name))
+		}
+		// A warning, not a failure: the schema being behind is a normal
+		// state after an upgrade, and it is one command away from fixed.
+		r.warn("migrations",
+			fmt.Sprintf("%s, %d pending: %s", detail, len(status.Pending), strings.Join(names, ", ")),
+			"run: apex sync\n"+
+				"doctor does not apply migrations: they are forward-only and cannot be rolled back,\n"+
+				"so a command that only verifies the environment must not make one")
+		return
+	}
+	r.ok("migrations", detail+", 0 pending")
+}
+
+// checkDigestRoute warns about spending subscription quota on bulk work when
+// an API key is sitting right there (DESIGN.md §8, "the binding constraint is
+// quota contention").
+//
+// The condition is narrower than §18 originally proposed, and deliberately
+// so. §18 asked for a warn on models.digest.provider == "claude-cli" full
+// stop. But the digest slot is the high-volume one, and the reason to move it
+// off the subscription is that the session window is shared with the user's
+// own Claude Code work — which is only advice worth giving if the user has
+// somewhere else to put it. On an all-subscription machine with no API key at
+// all, that warning is a recurring complaint about a choice with no
+// alternative, and a doctor that nags about the only possible configuration
+// teaches the user to stop reading its warnings.
+//
+// So it fires on the combination that is actually a mistake: digests routed
+// at the subscription while a key for a key-based provider resolves. §18 has
+// been updated to match.
+func checkDigestRoute(ctx context.Context, r *report, cfg *config.Config) {
+	if cfg.Models.Digest.Provider != claudecli.Name {
+		return
+	}
+	const name = "digest route"
+
+	var available []string
+	for _, p := range config.KeyProviders() {
+		if _, err := config.ResolveKey(ctx, p); err == nil {
+			available = append(available, p)
+		}
+	}
+	if len(available) == 0 {
+		return
+	}
+	r.warn(name,
+		fmt.Sprintf("bulk digest generation is routed at %s while a key for %s is available",
+			claudecli.Name, strings.Join(available, " and ")),
+		fmt.Sprintf("the subscription window is shared with your own Claude Code sessions, and a full sync is the\n"+
+			"easiest way to spend it; the advisor and chat slots are low-volume and belong there instead\n"+
+			"in %s:\n  [models.digest]\n  provider = %q\n  model    = \"claude-opus-5\"",
+			cfg.Path(), available[0]))
 }
 
 // probeMaxTokens keeps the probe request as small as a request can be while

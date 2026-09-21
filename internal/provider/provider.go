@@ -86,10 +86,30 @@ func (t EventType) String() string {
 // to confirm the cache prefix in DESIGN.md §8 is actually being hit. A run of
 // calls that reports zero cache reads means something volatile crept into the
 // prefix.
+//
+// CacheWriteTokens is not redundant with it, and M4 added it because M3.5 made
+// the gap concrete: one trivial `say hi` through claude-cli reported 16,440
+// cache-creation tokens and zero cache reads, and Apex had nowhere to put the
+// number. Reads alone cannot tell a cache that works from a prefix just
+// unstable enough to be re-written every call — in that failure mode reads
+// stay at zero and writes stay high, which is the expensive case and looks
+// identical to "not cached yet". Cache writes are billed at a premium, so this
+// is the field that catches the mistake.
+//
+// Model is which model actually served the request, which is not always the
+// one that was asked for: an alias ("opus" through the CLI) or a fallback
+// resolves to something else. DESIGN.md §7 gives digests.model and
+// action_items.generated_by to provenance, and without this field Apex could
+// only ever record its own intent.
 type Usage struct {
-	InputTokens     int
-	OutputTokens    int
-	CacheReadTokens int
+	InputTokens      int
+	OutputTokens     int
+	CacheReadTokens  int
+	CacheWriteTokens int
+	// Model is empty when the provider did not report one; nothing here
+	// invents it from the request, because a recorded guess is worse than a
+	// recorded blank.
+	Model string
 }
 
 // Event is one item on a provider's stream.

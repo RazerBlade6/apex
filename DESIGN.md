@@ -614,13 +614,30 @@ this is the number that catches the mistake.
 serving model on the response, Apex can only record what it *asked* for, which
 diverges the moment a fallback or an alias resolves to something else.
 
-> **Both fields are specified here but not yet implemented — M4 must add them.**
-> This stopped being hypothetical during M3.5: a trivial `say hi` through the CLI
-> reported **16,440 cache-creation tokens and zero cache reads** — exactly the
-> expensive pattern this section warns about — and Apex had nowhere to put the
-> number. The CLI also hands over the serving model in `modelUsage` for free. Two
-> fields, three adapters, and it gets more expensive the longer M4 logs without
-> them.
+> **Both fields landed in M4**, in all three adapters. Anthropic reads
+> `cache_creation_input_tokens` and the accumulated message's `model`; OpenAI
+> reports no cache-write count (its caching is automatic and unbilled, so zero is
+> the honest value there) and takes the serving model from the chunk; claude-cli
+> reads the CLI's `cache_creation_input_tokens` and stamps the model the run
+> reported, falling back to the single key of the result event's `modelUsage`.
+>
+> **The first thing they measured is a finding.** Every live `apex sync` through
+> `claude-cli` reports `cache r=0 w≈1150` — the prompt cache is written on every
+> call and never read. That is the exact expensive pattern this section warns
+> about, and reads alone could not have distinguished it from "not cached yet".
+> The cause is structural rather than a bug in the prompt: each call is a fresh
+> subprocess with `--no-session-persistence`, and the CLI picks its own cache
+> breakpoints, so Apex's stable-prefix ordering buys nothing on this transport.
+> It still buys everything on the API adapters, where `CacheSystem` places a real
+> breakpoint. **Prompt-cache savings are therefore an API-key benefit, not a
+> subscription one** — which is a second, independent reason to route the bulk
+> `digest` slot at a key when one exists.
+>
+> The same runs expose a second limitation: the CLI reports `input_tokens: 2` for
+> a prompt carrying a full PROJECT.md, README and git log. Its input accounting
+> counts only the uncached remainder, so `Usage.InputTokens` from `claude-cli` is
+> not comparable with the same field from the API adapters and must not be summed
+> across them.
 
 ### Implementation notes
 
@@ -1067,6 +1084,11 @@ mode     = "explicit"   # explicit | on_start | scheduled
 schedule = "daily"      # daily | weekly — only read when mode = "scheduled"
 ```
 
+```toml
+[sync]
+digest_workers = 2      # how many digests to generate at once
+```
+
 - **`explicit`** — only `apex sync` refreshes. Most predictable, no surprise spend.
 - **`on_start`** — refresh stale digests when the TUI launches.
 - **`scheduled`** — refresh if `last_synced_at` is older than the interval, checked
@@ -1074,6 +1096,15 @@ schedule = "daily"      # daily | weekly — only read when mode = "scheduled"
 
 Default is `explicit`. Commands that depend on digests report their age when they
 run against stale data, so the predictable default never silently misleads.
+
+`digest_workers` bounds the errgroup in §14 step 4. It is small by default
+because a `claude-cli` route is one subprocess per project (§8): an unbounded
+fan-out over a twelve-project portfolio starts twelve `claude` processes and
+spends a session window shared with the user's own Claude Code work as fast as
+the machine allows. A user on an API key has no such coupling and can raise it.
+
+`apex sync --dry-run` reports which digests are stale and sends nothing to a
+model, which is the cheap way to find out what a refresh would cost.
 
 ---
 
@@ -1167,7 +1198,7 @@ Each milestone is independently verifiable.
 | M2 | Context | Markdown + frontmatter parsing, registry sync, git introspection |
 | M3 | Providers | Anthropic and OpenAI adapters, streaming, structured output |
 | M3.5 | Subscription provider | `claudecli` provider, credential model, `doctor` auth check |
-| M4 | Advisor | Digest generation, `apex review`, `apex ideas`, `apex items` |
+| M4 | Advisor | Digest generation, `apex review`, `apex ideas`, `apex items`, `apex show` |
 | M5 | Executor | `Executor` interface, `ClaudeCodeExecutor`, `apex do`, `apex start` |
 | M6 | TUI | Bubble Tea chat, items, and projects views |
 
@@ -1201,29 +1232,54 @@ Settled 2026-09-21, previously open:
    locked. See §7. Established before M1 as intended.
 6. **Dispatch concurrency** — enforced per-project exclusive lock. See §10.
 
+7. **`SELECT *` enforcement** — closed in M1 as `TestNoSelectStar`, which walks
+   every `.go` and `.sql` file and fails on a match outside comments. A test rather
+   than a convention, which is what the guarantee needed.
+
+8. **`apex doctor` mutation** — closed in M4. `doctor` is read-only: it reports
+   `N applied, N pending` as a **warning** whose fix is `run: apex sync`, and never
+   calls `Migrate`. Every other read-only command (`items`, `show`, `review`,
+   `ideas`) refuses against a pending schema with the same message rather than
+   quietly migrating; only `sync` applies. This was not hypothetical — during M3,
+   `apex doctor` applied migration 002 to the real database with no prompt and no
+   mention in its own output, which is a verification command taking a one-way
+   door.
+
+9. **`Usage.CacheWriteTokens` and `Usage.Model`** — closed in M4 across all three
+   adapters. See the blockquote in §8: the first thing they measured was that
+   `claude-cli` writes the prompt cache on every call and never reads it, which
+   reads alone could not have detected.
+
+10. **Quota contention warning** — added in M4, with the condition **narrowed from
+    what this section originally proposed**. The original text asked for a warn
+    whenever `models.digest.provider == "claude-cli"`. That is wrong on the machine
+    this feature shipped to: every route there is `claude-cli` with no API key
+    anywhere, deliberately, so the warning would fire on every run about a choice
+    with no alternative — and a `doctor` that nags about the only possible
+    configuration teaches the user to stop reading its warnings.
+
+    The implemented condition is the one that is actually actionable: **digests
+    routed at `claude-cli` while a key for a key-based provider resolves.** The
+    advice — "spend the bulk slot on the key you already have" — only makes sense
+    when there is a key to spend. §8's second finding reinforces it: prompt-cache
+    savings do not exist on the subscription transport at all.
+
 ### Still open
 
 - **Turso offline-writes maturity in `tursogo`** — would remove the network
   dependency on writes and let `TursoBackend` become the sensible default. Verify
   against the driver before relying on it.
-7. **`SELECT *` enforcement** — closed in M1 as `TestNoSelectStar`, which walks
-   every `.go` and `.sql` file and fails on a match outside comments. A test rather
-   than a convention, which is what the guarantee needed.
-
-8. **`apex doctor` mutation** — decided, not yet implemented. `doctor` must become
-   **read-only**: it reports `N pending` as a warning telling the user to run `apex
-   sync`, and `sync` owns migration. This is no longer hypothetical — during M3,
-   running `apex doctor` applied migration 002 to the real database with no prompt
-   and no mention in its own output. A command whose stated job is verifying the
-   environment performed a one-way schema change. Implement in M4.
-
-### Still open
-
-- **Quota contention is documented but not enforced.** §8 warns that routing the
-  bulk `digest` slot at `claude-cli` can exhaust the session window needed for real
-  Claude Code work — yet a config doing exactly that passes `doctor` with exit 0. A
-  warn on `models.digest.provider == "claude-cli"` costs nothing and fires on
-  precisely the configuration the spec tells you not to write. Add in M4.
+- **`Provider.Structured` reports no `Usage`.** `Stream` returns usage on
+  `EventDone`; `Structured` returns only an error. So the two calls that carry the
+  *largest* prompt Apex ever sends — `review` and `ideas`, which hold the identity
+  context plus every digest — are the only ones whose token cost is invisible,
+  including the cache-write number §8 just proved was worth having. It also forces
+  an inconsistency in provenance: `digests.model` records the **serving** model
+  from `Usage.Model`, while `action_items.generated_by` can only record the
+  **route's** model, so one column says `claude-sonnet-5` and the other says
+  `sonnet` for the same run. Fixing it means changing the interface — most likely
+  `Structured(...) (Usage, error)` — which is a deliberate M5 change, not something
+  to slip into a milestone that did not need it.
 - **`doctor` resolves the `claude` binary twice, two different ways.** The M1
   executor check has its own lookup; `claudecli.LookPath` is a second. They agree
   today. M5 should collapse the executor onto the provider's lookup so they cannot
@@ -1231,7 +1287,19 @@ Settled 2026-09-21, previously open:
 - **`--probe` is cheap, not free, for `claude-cli`.** The API adapters bound the
   probe with `max_tokens: 16`; the CLI has no equivalent flag, so a subscription
   probe generates a full short reply against the user's window.
-- **`store.UpsertProject` clears `last_synced_at`.** Its `ON CONFLICT` sets the
-  column from `excluded`, so any caller that does not pre-read the row silently
-  wipes it. `project.Upsert` works around this; fix it at the source in M3 or M4
-  rather than requiring every caller to remember.
+- **Deduplication is exact-title only.** M4 compares normalised titles within a
+  project (lowercase, punctuation dropped, whitespace collapsed). It catches the
+  common case — the model re-proposing what it proposed last week — and misses any
+  paraphrase. Anything better needs embeddings, which §1 rules out of v1, and the
+  failure mode was chosen deliberately: a duplicate the user can dismiss is better
+  than a silently dropped item they never see.
+- **Glamour is specced in §3 but not yet a dependency.** M4's listings use a small
+  plain-text renderer in `cmd/apex/render.go` instead, so the milestone added no
+  third-party dependency to make four read-only views look nicer. It emits no ANSI,
+  so `apex show AI-003 > note.md` produces a file rather than escape sequences. M6
+  should take the Glamour decision deliberately, when the TUI actually wants
+  styling.
+- **`apex review <project>` narrows the digest set to one project**, which is
+  cheaper and strictly worse: the advisor's whole value is the cross-portfolio
+  comparison. It is offered because a user working on one thing will ask for it,
+  but the flag is a cost lever, not a quality one, and the help text says so.

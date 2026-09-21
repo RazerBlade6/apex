@@ -195,7 +195,7 @@ func (p *Provider) run(ctx context.Context, params sdk.MessageNewParams, ch chan
 		provider.EmitFinal(ctx, ch, provider.Event{Type: provider.EventError, Err: classify("stream", err)})
 		return
 	}
-	usage := usageOf(msg.Usage)
+	usage := usageOf(msg)
 	provider.EmitFinal(ctx, ch, provider.Event{Type: provider.EventDone, Usage: &usage})
 }
 
@@ -258,11 +258,21 @@ func firstText(msg sdk.Message) string {
 	return ""
 }
 
-func usageOf(u sdk.Usage) provider.Usage {
+// usageOf reads the accumulated message's accounting.
+//
+// cache_creation_input_tokens is the premium-billed number DESIGN.md §8 calls
+// the one that catches an unstable cache prefix, so it is carried rather than
+// dropped. The serving model comes from the message itself, not from the
+// request: an alias or a fallback would otherwise be recorded as whatever was
+// asked for.
+func usageOf(msg sdk.Message) provider.Usage {
+	u := msg.Usage
 	return provider.Usage{
-		InputTokens:     int(u.InputTokens),
-		OutputTokens:    int(u.OutputTokens),
-		CacheReadTokens: int(u.CacheReadInputTokens),
+		InputTokens:      int(u.InputTokens),
+		OutputTokens:     int(u.OutputTokens),
+		CacheReadTokens:  int(u.CacheReadInputTokens),
+		CacheWriteTokens: int(u.CacheCreationInputTokens),
+		Model:            string(msg.Model),
 	}
 }
 

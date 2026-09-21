@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/RazerBlade6/apex/internal/contextfs"
 	"github.com/RazerBlade6/apex/internal/lock"
 	"github.com/RazerBlade6/apex/internal/project"
+	"github.com/RazerBlade6/apex/internal/provider"
 	"github.com/RazerBlade6/apex/internal/store"
 )
 
@@ -23,6 +26,7 @@ import (
 type fixture struct {
 	home string // stands in for $HOME, so `path: ~/...` resolves into it
 	root string // stands in for ~/.apex
+	fake *fakeCmdProvider
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -37,7 +41,64 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Setenv("HOME", f.home)
 	t.Setenv("APEX_HOME", f.root)
+	f.fake = installFakeProvider(t)
 	return f
+}
+
+// installFakeProvider points the command layer at an offline provider for the
+// duration of one test.
+//
+// Every command from M4 onwards can reach a model, so the command tests would
+// otherwise need a credential and a network — or, worse, would quietly spend
+// the user's subscription quota when someone ran `go test`. The seam is the
+// package-level providerFactory; it is restored afterwards.
+func installFakeProvider(t *testing.T) *fakeCmdProvider {
+	t.Helper()
+	fake := &fakeCmdProvider{Text: "A generated digest."}
+	previous := providerFactory
+	providerFactory = func(context.Context, config.ModelRoute) (provider.Provider, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { providerFactory = previous })
+	return fake
+}
+
+// fakeCmdProvider answers every call from memory.
+type fakeCmdProvider struct {
+	mu    sync.Mutex
+	calls int
+	// Text is returned by Stream, which is what digest generation uses.
+	Text string
+	// JSON is what Structured decodes, for review and ideas.
+	JSON string
+}
+
+func (f *fakeCmdProvider) Name() string { return "fake" }
+
+func (f *fakeCmdProvider) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *fakeCmdProvider) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	ch := make(chan provider.Event, 3)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: f.Text}
+	ch <- provider.Event{Type: provider.EventDone, Usage: &provider.Usage{
+		InputTokens: 120, OutputTokens: 60, CacheWriteTokens: 100, Model: "fake-model-5",
+	}}
+	close(ch)
+	return ch, nil
+}
+
+func (f *fakeCmdProvider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) error {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return json.Unmarshal([]byte(f.JSON), out)
 }
 
 // project creates a fake project directory under the fixture home.
@@ -192,8 +253,8 @@ func TestSyncEndToEnd(t *testing.T) {
 			t.Errorf("output does not mention %q:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "Digests are NOT generated") {
-		t.Errorf("output does not say digests were not generated:\n%s", out)
+	if !strings.Contains(out, "Generated 2 digest(s)") {
+		t.Errorf("output does not report the two digests it generated:\n%s", out)
 	}
 	if !strings.Contains(out, "Broken") {
 		t.Errorf("output does not report the malformed entry:\n%s", out)
@@ -259,25 +320,33 @@ I forgot the path line entirely.
 	if !strings.Contains(out2, "PROJECTS.md is unchanged") {
 		t.Errorf("second run did not report the file as unchanged:\n%s", out2)
 	}
-	// Nothing has generated a digest, so both are still reported as needing one.
-	if !strings.Contains(out2, "2 digest(s) would be regenerated") {
-		t.Errorf("second run did not report both digests as needing generation:\n%s", out2)
+	// The first run cached both digests against their source hashes, and
+	// nothing has moved since, so the second run must reach no model at all.
+	// This is the property that makes a warm sync free (DESIGN.md §6).
+	if !strings.Contains(out2, "No digests are out of date") {
+		t.Errorf("a second sync did not treat the cached digests as fresh:\n%s", out2)
+	}
+	if n := f.fake.Calls(); n != 2 {
+		t.Errorf("%d model calls across two syncs, want 2: a fresh digest was regenerated", n)
 	}
 }
 
-// TestSyncStalenessReporting checks step 4 of DESIGN.md §14: a cached digest
-// whose source hash still matches is fresh, and editing PROJECT.md makes it
-// stale without anything being regenerated.
-func TestSyncStalenessReporting(t *testing.T) {
+// TestSyncStalenessAndRegeneration is DESIGN.md §14 step 4 end to end: a
+// cached digest whose source hash still matches is left alone, editing
+// PROJECT.md makes it stale, and only then does a model get called.
+//
+// The --dry-run leg is the guard that matters for the user's wallet: it must
+// report exactly what a real run would regenerate and send nothing.
+func TestSyncStalenessAndRegeneration(t *testing.T) {
 	f := newFixture(t)
 	dir := f.project(t, "Atlas", map[string]string{contextfs.ProjectFile: atlasDoc})
 	f.writeRegistry(t, "# Projects\n\n## Atlas\npath: ~/Development/Atlas\n")
 
-	if out, err := run(t, "sync"); err != nil {
-		t.Fatalf("sync: %v\n%s", err, out)
+	// Register the project without generating anything, then cache a digest
+	// against its current sources by hand: there is nothing to do.
+	if out, err := run(t, "sync", "--dry-run"); err != nil {
+		t.Fatalf("sync --dry-run: %v\n%s", err, out)
 	}
-
-	// Pretend M4 has been here.
 	hash := project.SourceHash(project.HashInputs{ProjectDoc: atlasDoc, HasProjectDoc: true})
 	seedDigest(t, "atlas", hash)
 
@@ -285,11 +354,11 @@ func TestSyncStalenessReporting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "fresh") {
+	if !strings.Contains(out, "fresh") || !strings.Contains(out, "No digests are out of date") {
 		t.Errorf("a matching source hash was not reported as fresh:\n%s", out)
 	}
-	if !strings.Contains(out, "No digests are out of date") {
-		t.Errorf("output did not report everything as up to date:\n%s", out)
+	if n := f.fake.Calls(); n != 0 {
+		t.Errorf("a fresh digest still cost %d model call(s)", n)
 	}
 
 	// Editing PROJECT.md must make it stale.
@@ -297,24 +366,46 @@ func TestSyncStalenessReporting(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, contextfs.ProjectFile), []byte(edited), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
+	// --dry-run reports the work and does none of it.
+	out, err = run(t, "sync", "--dry-run")
+	if err != nil {
+		t.Fatalf("sync --dry-run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "stale") || !strings.Contains(out, "1 digest(s) would be regenerated") {
+		t.Errorf("--dry-run did not name the stale digest:\n%s", out)
+	}
+	if n := f.fake.Calls(); n != 0 {
+		t.Errorf("--dry-run made %d model call(s)", n)
+	}
+	if d := getDigest(t, "atlas"); d.Body != "a digest from a later milestone" {
+		t.Errorf("--dry-run rewrote the cached digest: %q", d.Body)
+	}
+
+	// A real run regenerates exactly that one.
 	out, err = run(t, "sync")
 	if err != nil {
 		t.Fatalf("sync: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "stale") {
-		t.Errorf("an edited PROJECT.md was not reported as stale:\n%s", out)
+	if n := f.fake.Calls(); n != 1 {
+		t.Errorf("%d model call(s) for one stale project, want 1", n)
 	}
-	if !strings.Contains(out, "1 digest(s) would be regenerated") {
-		t.Errorf("output did not name the stale digest:\n%s", out)
-	}
-
-	// And the cached digest is still there: sync reports, it does not generate.
 	d := getDigest(t, "atlas")
-	if d.SourceHash != hash {
-		t.Errorf("sync rewrote the cached digest: source_hash = %q, want %q", d.SourceHash, hash)
+	if d.Body != f.fake.Text {
+		t.Errorf("digest body = %q, want the generated text", d.Body)
 	}
-	if d.Body != "a digest from a later milestone" {
-		t.Errorf("sync rewrote the digest body: %q", d.Body)
+	newHash := project.SourceHash(project.HashInputs{ProjectDoc: edited, HasProjectDoc: true})
+	if d.SourceHash != newHash {
+		t.Errorf("digest cached against %q, want the edited sources' hash %q", d.SourceHash, newHash)
+	}
+	if d.Model != "fake-model-5" {
+		t.Errorf("digest model = %q, want the serving model the provider reported", d.Model)
+	}
+	// last_synced_at records when digests were refreshed (DESIGN.md §7).
+	for _, p := range listProjects(t) {
+		if p.Slug == "atlas" && p.LastSyncedAt == nil {
+			t.Error("regenerating a digest did not stamp last_synced_at")
+		}
 	}
 }
 
@@ -616,6 +707,23 @@ func TestSyncNeverAdoptsAnUnmarkedLine(t *testing.T) {
 }
 
 // --- store helpers ----------------------------------------------------------
+
+// openFixtureStoreWithoutMigrating opens the fixture database and leaves the
+// schema exactly as it found it, which is what a test asserting that some
+// other command did not migrate needs.
+func openFixtureStoreWithoutMigrating(t *testing.T) (*store.Store, func()) {
+	t.Helper()
+	path, err := config.DatabasePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := store.NewLocalBackend(path)
+	st, err := store.Open(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	return st, func() { _ = backend.Close() }
+}
 
 func openFixtureStore(t *testing.T) (*store.Store, func()) {
 	t.Helper()

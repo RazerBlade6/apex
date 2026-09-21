@@ -209,6 +209,13 @@ func (p *Provider) Structured(ctx context.Context, req provider.Request, schema 
 
 // usageOf reads the usage block, which is present only on the final chunk and
 // only when include_usage was set.
+//
+// CacheWriteTokens is left at zero, and that is the honest value rather than a
+// gap: OpenAI's prompt caching is automatic and it does not bill or report a
+// separate cache-write count, so there is no number to carry. Anthropic and
+// claude-cli both report one, which is where DESIGN.md §8's argument for the
+// field applies. The serving model comes from the chunk, since a dated
+// snapshot id is what an undated request actually resolves to.
 func usageOf(chunk sdk.ChatCompletionChunk) (provider.Usage, bool) {
 	if !chunk.JSON.Usage.Valid() {
 		return provider.Usage{}, false
@@ -218,6 +225,7 @@ func usageOf(chunk sdk.ChatCompletionChunk) (provider.Usage, bool) {
 		InputTokens:     int(u.PromptTokens),
 		OutputTokens:    int(u.CompletionTokens),
 		CacheReadTokens: int(u.PromptTokensDetails.CachedTokens),
+		Model:           chunk.Model,
 	}, true
 }
 
