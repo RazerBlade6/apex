@@ -146,4 +146,4 @@ authoritative document; this README is the summary.
 
 ## License
 
-Not yet chosen.
+[MIT](LICENSE)
