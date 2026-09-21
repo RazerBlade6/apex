@@ -85,6 +85,81 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	return out, nil
 }
 
+// GetProjectByPath returns the project registered at a path.
+//
+// A project's identity is its path, not its name (DESIGN.md §6): the slug
+// derives from the name, so matching by slug alone would turn a rename into a
+// second row and orphan the first along with its cached digest. Paths are not
+// unique by schema, so the lowest slug wins deterministically if two rows ever
+// share one.
+func (s *Store) GetProjectByPath(ctx context.Context, path string) (Project, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+projectColumns+` FROM projects WHERE path = ? ORDER BY slug LIMIT 1`, path)
+	p, err := scanProject(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Project{}, fmt.Errorf("project at %s: %w", path, ErrNotFound)
+	}
+	if err != nil {
+		return Project{}, fmt.Errorf("get project at %s: %w", path, err)
+	}
+	return p, nil
+}
+
+// RenameProjectSlug re-keys a project, carrying its digest, action items, and
+// ideas across with it, so renaming an entry in PROJECTS.md costs nothing
+// (DESIGN.md §6).
+//
+// The schema declares no ON UPDATE action on the foreign keys, and migrations
+// are additive-only (§7), so the parent key cannot be updated while foreign
+// keys are enforced statement by statement. PRAGMA defer_foreign_keys moves
+// enforcement to commit time: the whole re-key is one atomic step and the
+// schema is left alone. The pragma is scoped to this transaction and clears
+// when it ends.
+func (s *Store) RenameProjectSlug(ctx context.Context, oldSlug, newSlug string) error {
+	if oldSlug == newSlug {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("rename project %s to %s: %w", oldSlug, newSlug, err)
+	}
+	defer tx.Rollback() //nolint:errcheck // a committed tx makes this a no-op
+
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return fmt.Errorf("rename project %s to %s: defer foreign keys: %w", oldSlug, newSlug, err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE projects SET slug = ? WHERE slug = ?`, newSlug, oldSlug)
+	if err != nil {
+		return fmt.Errorf("rename project %s to %s: %w", oldSlug, newSlug, err)
+	}
+	if err := requireRow(res, fmt.Sprintf("project %s", oldSlug)); err != nil {
+		return err
+	}
+
+	// Every table that keys off a project slug. A new one added later must be
+	// added here too, or a rename would silently orphan it.
+	for _, child := range []struct {
+		what string
+		stmt string
+	}{
+		{"digest", `UPDATE digests SET project_slug = ? WHERE project_slug = ?`},
+		{"action items", `UPDATE action_items SET project_slug = ? WHERE project_slug = ?`},
+		{"ideas", `UPDATE ideas SET started_project_slug = ? WHERE started_project_slug = ?`},
+	} {
+		if _, err := tx.ExecContext(ctx, child.stmt, newSlug, oldSlug); err != nil {
+			return fmt.Errorf("rename project %s to %s: %s: %w", oldSlug, newSlug, child.what, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rename project %s to %s: %w", oldSlug, newSlug, err)
+	}
+	return nil
+}
+
 // MarkProjectSynced records the time a project's digest was last refreshed.
 func (s *Store) MarkProjectSynced(ctx context.Context, slug string, at time.Time) error {
 	res, err := s.db.ExecContext(ctx,

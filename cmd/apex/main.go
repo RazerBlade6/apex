@@ -1,8 +1,8 @@
 // Command apex is a personal project-management and development hub.
 //
-// M1 implements the foundation only: `apex doctor` and `apex config`. The
-// advisory, executor, and TUI surfaces described in DESIGN.md §11 arrive in
-// later milestones.
+// M1 and M2 implement the foundation and the context layer: `apex doctor`,
+// `apex config`, and `apex sync`. The advisory, executor, and TUI surfaces
+// described in DESIGN.md §11 arrive in later milestones.
 package main
 
 import (
