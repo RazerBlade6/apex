@@ -9,18 +9,17 @@ import (
 
 // Markdown rendering for the terminal.
 //
-// DESIGN.md §3 names Glamour as the markdown renderer, and it is the right
-// answer for M6's TUI, where scrollback wants styling. It is NOT in go.mod and
-// its module is not in this machine's module cache, so adding it here would
-// mean pulling charmbracelet/glamour plus its dependency tree to make four
-// read-only listings look nicer — a new third-party dependency introduced as a
-// side effect of a milestone that did not need one.
+// DESIGN.md §3 names Glamour as the markdown renderer, and M6 added it — for
+// internal/tui's chat scrollback, and for nothing else.
 //
-// What those listings actually need is narrow: wrap prose to the terminal,
-// keep list structure, and do not mangle a fenced code block. That is this
-// file. It emits no ANSI, so piping `apex show AI-003 > note.md` produces a
-// file rather than escape sequences, and it makes the Glamour decision M6's to
-// take deliberately.
+// This renderer stays, and the two are not a duplication waiting to be
+// consolidated: one exists precisely because the other emits ANSI. Everything
+// below writes plain text, so `apex show AI-003 > note.md` produces a file
+// rather than a screenful of escape sequences, and every command here is meant
+// to be cron-able and pipeable (§11).
+//
+// What these listings need is narrow: wrap prose to the terminal, keep list
+// structure, and do not mangle a fenced code block.
 
 // defaultWidth is used when the terminal's width is unknown. 80 is the
 // conventional floor and is narrow enough to read comfortably in a wide

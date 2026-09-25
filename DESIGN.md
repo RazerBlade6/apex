@@ -254,24 +254,60 @@ truncate an identity file.
 
 ```markdown
 ## Observed
-<!--apex 2026-09-25--> Prefers pixel art for UI work; said while reviewing a mockup.
-<!--apex 2026-09-21--> Builds CLIs in Go or Rust by default.
+<!-- Apex maintains the entries below. Everything else in this file is yours. -->
+<!--apex 2026-09-25--> Prefers pixel art for UI work — source: said while reviewing a mockup.
+<!--apex 2026-09-21--> Builds CLIs in Go or Rust by default — source: asked for a stack recommendation.
 ```
+
+> **M6 changed the separator from the semicolon this example first used.** The
+> source has to be read back — `apex profile` lists observations "with dates and
+> sources" — and a semicolon cannot be parsed out of a claim that contains one.
+> `" — source: "` is explicit and survives the round trip. It stays visible prose
+> rather than a hidden comment attribute on purpose: this text is re-sent to the
+> model on every advisor call, and "said while reviewing one mockup" is exactly
+> the qualifier that stops a one-off remark being read as a standing preference.
+>
+> The block is found by its **heading**, not by being last in the file, so a user
+> who adds a section below it keeps it. Apex's block simply ends where the next
+> heading begins.
 
 **Extraction is gated, not per-turn.** An extraction call after every chat turn
 doubles the cost of conversation. Apex screens cheaply first — first person plus a
 preference or capability verb ("I like / prefer / always / never / I use / I'm
 learning") — and only then spends a call. A turn revealing nothing costs nothing.
 
+The gate errs wide deliberately: a false positive costs one cheap call that
+returns nothing, a false negative loses a fact silently. **The call goes to the
+`digest` route**, not the `chat` one — extraction is a classification, which §8
+names the digest slot as the cost lever for. The gate bounds frequency; the route
+bounds unit cost, and both are needed.
+
 **Observations are superseded, not stacked.** "I'm learning Zig", followed months
 later by "I know Zig well now", must replace the earlier line rather than sit beside
 it. Contradiction handling belongs in extraction, not in a later cleanup pass.
 
-**The block is capped and consolidated.** This matters more than it appears:
-identity context is re-sent on *every* advisor call, and §8 established that prompt
-caching does not work on the subscription transport. An unbounded `## Observed`
-block is therefore a compounding quota cost on every call, forever. Cap it, and
-consolidate related observations into single lines when it fills.
+**The block is capped at 12 entries per file.** Identity context is re-sent on
+*every* advisor call, and §8 established that prompt caching does not work on the
+subscription transport, so an unbounded block is a compounding cost forever.
+
+**Consolidation belongs to extraction, because nothing else pays for it.** An
+earlier draft said to "consolidate when it fills" without naming an owner — and
+every other model call in Apex is attached to a user action (`sync`, `review`, `do`,
+a chat turn). "The block is full" is not a user action, so no invocation was funding
+it. Consolidation therefore rides along with an extraction call that was going to
+happen anyway: the extractor may replace two narrow claims with one broader line. A
+block that fills and then goes quiet truncates oldest-first without consolidating,
+which is the honest behaviour rather than a silent debt.
+
+> The general form is worth remembering: **a spec describing ongoing upkeep must
+> name the invocation that pays for it**, or the upkeep quietly becomes some other
+> command's opportunistic side effect — or never happens at all.
+
+**`apex profile` reports the block's approximate per-call token cost.** The cap
+above is a number chosen by argument, and arguments about token cost are easy to be
+wrong about by a factor of five. Apex already measures per-call usage everywhere
+else; a claim about compounding cost that ships no instrument is an assertion, not a
+budget.
 
 **The user stays in control.** `apex profile` lists observations with dates and
 sources; `apex profile --forget <n>` removes one. An observation the user promotes
@@ -282,6 +318,21 @@ into their own prose above the block should then be dropped from it.
 > over-general extraction quietly skews every future suggestion with no visible
 > cause. Recording the *source* alongside the claim is what makes a wrong inference
 > debuggable rather than mysterious.
+
+**Extraction must never be shown its own prior conclusions as authority.** This is
+the sharper version of the risk above, and it is structural rather than a matter of
+care. Everything else Apex writes is *data* — digests, registry summaries. An
+observation is different: it enters the system prompt of every advisor call,
+**including the next extraction call**, which has to see existing observations in
+order to supersede them. So a wrong observation biases the very model deciding
+whether to record the next one, and a standing preference becomes
+**self-confirming** rather than merely wrong.
+
+Recording the source makes a bad inference debuggable *by a human*; it does nothing
+to break the loop. Prior observations must therefore be presented to the extractor
+as provisional claims open to revision — explicitly not as established facts about
+the user — and an extraction that merely re-confirms an existing entry adds nothing
+and must be discarded rather than counted as corroboration.
 
 ### Digests
 
@@ -924,6 +975,18 @@ changes" over a tree with two new files. Where the agent's own count disagrees w
 the working tree, report both and say which one counts. The general rule: **when a
 fact is observable locally, never accept the subprocess's account of it.**
 
+> **The corollary, learned the hard way across M5 and M6.** M5 concluded that a
+> dispatch could not run commands, and mitigated it by *telling the agent so in the
+> brief*. An M6 dispatch then ran a Bash command and, in the same reply, reported
+> that it could not run commands — because the brief had told it that. The
+> mitigation had made the original finding unfalsifiable for an entire milestone,
+> and it only surfaced because a test disagreed with a log.
+>
+> So: **a mitigation that tells the agent what it cannot do must never be the same
+> channel used to observe what it can do.** Anywhere Apex asserts a capability limit
+> inside a prompt, that limit needs an independent check — the same rule stated
+> above for file changes, applied to capabilities.
+
 **Apex generates the session UUID** and stores it on the `exec_runs` row. A stalled
 or failed dispatch is then resumable with `claude --resume <uuid>`, and the run is
 traceable after the fact.
@@ -942,11 +1005,23 @@ stays a per-run opt-in (`apex do --bypass-permissions`).
 > verify. Neither decision is wrong alone; together they guaranteed that every
 > unattended run reports unverified work.
 >
-> Mitigated by stating the run's actual capabilities in the brief, so it stops
-> promising what it cannot do. **The better answer, still open: a narrow
-> `--allowed-tools` allowlist** carrying just the build and test commands for the
-> project's stack, so an unattended run can meet its own acceptance criteria
-> without being handed everything.
+> **Measured in M6, and the truth is narrower than either guess.** Under
+> `acceptEdits` + `--permission-prompts none` + `--safe-mode` on 2.1.282:
+> `git status --short` **ran**, `mkdir -p .probe && rmdir .probe` **ran**, and
+> `go version` was **DENIED** ("This command requires approval"). **Approval is per
+> command, not per mode.** So the original conclusion holds exactly where it
+> matters — `go version` is about as harmless as a toolchain call gets, so
+> `go build` and `go test` certainly are — while the brief's blanket claim that the
+> agent cannot run commands was simply false. The brief now says it cannot run
+> commands *that build or test this project*, which is the load-bearing clause.
+>
+> This **strengthens** the case for a narrow `--allowed-tools` allowlist rather than
+> dissolving it: the CLI is already doing per-command allowlisting, it just does not
+> know that `go build ./...` is this project's verification step. Still open.
+>
+> M6 established that the denial is **per command, not per mode**: `git status`
+> and `mkdir` run, `go version` is denied. §18 has the measurement. The brief was
+> corrected to claim only what is true, and the allowlist remains the real fix.
 >
 > The general lesson is worth carrying into later sections: **wherever a spec
 > states both a capability limit and a success criterion, check that the limit
@@ -973,23 +1048,48 @@ meaning a user's personal Claude Code conventions silently shape every Apex
 dispatch. Some of them are actively wrong here: "delegate code generation to a
 sub-agent" is redundant advice for a process that *is* the delegation layer.
 
-**The mechanism is unresolved, and no flag does this cleanly.** What was checked
-against `claude` 2.1.278:
+**The mechanism was settled empirically in M6.** What was checked against
+`claude` 2.1.278, and re-checked against 2.1.282:
 
 | Candidate | Why it does not work |
 |---|---|
 | `--restricted` | Strips the code-running tools the executor exists to use |
 | `--bare` | Skips `CLAUDE.md` discovery but forces `ANTHROPIC_API_KEY` and never reads OAuth — kills subscription auth |
-| `--safe-mode` | Keeps auth working, but disables *all* customizations including the **project** `CLAUDE.md`, skills and hooks |
 | `--setting-sources project,local` | Governs `settings.json` sources, not `CLAUDE.md` discovery |
+| `CLAUDE_CONFIG_DIR=<scratch>` | Does relocate discovery — and relocates `.claude.json` with it, so the logged-in account goes too. `claude auth status --json` reports `loggedIn: false, authMethod: "none"`; seeding the scoped directory with the real `oauthAccount` does not change it. The `--bare` failure by another route |
+| `--safe-mode` **alone** | Keeps auth working, but disables *all* customizations including the **project** `CLAUDE.md`, skills and hooks |
 
-Remaining approaches, in preference order, to be settled empirically rather than by
-reading help text: scoping the config directory for the child process so the global
-file is not found while keychain auth still resolves; `--safe-mode` plus explicitly
-re-supplying the project `CLAUDE.md`; or, as a last resort, countering it in the
-brief, which is mitigation rather than exclusion. **If none is clean, say so rather
-than shipping something that half-works** — a dispatch that silently inherits half
-a config is worse than one that documents what it inherits.
+**Shipped: `--safe-mode`, plus Apex re-supplying the project `CLAUDE.md` verbatim
+in the appended system prompt.** Verified by real dispatch against 2.1.282 in a
+fixture project whose `CLAUDE.md` required a specific first line in every new
+file: the run authenticated, kept Bash, Read, Write and Edit, wrote the file with
+that line and cited the convention by name, and no rule from the user's global
+file appeared anywhere in it. A second probe asked the run directly whether it had
+been told anything about delegating work to a sub-agent — the global file's actual
+content — and it answered no.
+
+> **`claude auth status --json` is the cheap oracle.** The config-directory
+> approach was ruled out for zero tokens, because auth resolution can be
+> questioned without inference. Reach for it before spending a call on any
+> future flag.
+
+**What a dispatch inherits, stated rather than assumed.** `--safe-mode` disables
+every customization at *both* user and project scope, so the honest accounting is:
+
+- **Inherited:** the project's root `CLAUDE.md`, re-supplied by Apex under a
+  heading that says where it came from; and the working tree itself, because the
+  agent is standing in it.
+- **Not inherited:** the user's global `CLAUDE.md` — the point of the exercise;
+  `CLAUDE.md` files in subdirectories and `@`-imports from any of them; skills,
+  hooks, plugins, MCP servers and `settings.json` at either scope.
+
+Resolving nested files and imports would mean reimplementing the CLI's discovery
+rules against a moving target, and getting that subtly wrong is exactly the "half
+a config" outcome this section rules out. The limitation is documented instead.
+
+`executor.inherit_user_config = true` drops `--safe-mode` and restores the 2.1.x
+default, global file included. The field is named for what it turns *on* so that
+its absence from an older `config.toml` means the safe value.
 
 > **The builder loop runs on the Claude Code subscription, not on an API key.**
 > Apex is bring-your-own-key for the advisor loop only. Worth remembering for the
@@ -1125,6 +1225,7 @@ apex show <id>             detail for an item or idea
 apex do <id>               dispatch an action item to the executor
 apex start <idea-id>       scaffold a new project from an idea
 apex config                show resolved config and key sources
+apex profile               show what apex has learned about you; --forget <n>
 ```
 
 The non-interactive commands are what make Apex cron-able — "every Monday, refresh
@@ -1148,8 +1249,48 @@ Streaming is a natural fit: the provider's `Event` channel is drained by a
 `tea.Cmd` that returns one `streamDeltaMsg` per event and re-issues itself, so
 tokens arrive as ordinary messages into `Update`.
 
+**The update invariant: a message belongs to the component that requested it, not
+the one in focus.** This is the part of the Elm architecture that actually breaks,
+and it broke here — `Init` loads all three views at once, chat is the default, so
+the items and projects results arrived while chat held focus and were dropped. Both
+views read "loading…" forever with no error anywhere. Every driven-`Update` test
+passed, because such tests set the view first; only launching the application showed
+it.
+
+Two related invariants: a stream is identified by handle, so a reply arriving after
+a cancel is discarded rather than appended to the next question; and markdown is
+rendered when a turn *completes*, not per token, because running a parser over a
+half-written document is both expensive and visibly wrong.
+
+> **A spec that names an architecture should state that architecture's invariants,
+> not only its screens.** Naming three views said nothing about the one rule whose
+> violation is invisible to unit tests.
+
 `tui/` imports downward only. Nothing in `advisor/`, `provider/`, or `executor/`
 may import it — that boundary is what keeps a v2 non-terminal frontend possible.
+`TestTUIImportsDownwardOnly` walks the module and enforces it, the same way
+`TestNoSelectStar` enforces §7's rule: a guarantee is only worth something if
+breaking it fails the build.
+
+Dispatch would be the natural place for that boundary to break, because a
+dispatch is more than a subprocess — it takes the project lock, opens the
+`exec_runs` row and moves the item's status, all of which lives in `cmd/apex`.
+The TUI therefore takes a `Dispatcher` callback and streams whatever it writes,
+over an `io.Pipe` drained by the same re-issuing `tea.Cmd` as a model stream.
+
+**`enter` asks before it dispatches.** This is an addition to the line above, and
+it is deliberate: a dispatch takes an exclusive lock, spends subscription quota
+from the same window as the user's own sessions, and lets an agent edit a real
+project. Every other irreversible act in Apex is opt-in by name; a single
+keystroke starting one from a list the cursor is already moving through would be
+the exception.
+
+**A message goes to the view that owns it, not the view that is focused.** This
+was the first real bug in the package and no unit test found it, because every
+unit test sets the view before sending the message. `Init` loads all three
+surfaces at once and chat is the default, so the items and projects loads arrived
+while chat was focused and were dropped — both views then read "loading…" forever
+with nothing anywhere saying why. Only launching the application showed it.
 
 ---
 
@@ -1274,27 +1415,30 @@ tier 2 borrows from people who do it better, tier 3 handles what is bespoke.
 
 ## 15. Dependencies
 
-**None of these are installed.** The module cache is empty on this machine; the
-first `go get` will fetch everything fresh, and versions below are unpinned
-because they have not been verified.
+Versions in use as of M6 are pinned in `go.mod`. The Charm set arrived with M6
+and nothing before it needed them:
 
 ```
-github.com/charmbracelet/bubbletea
-github.com/charmbracelet/lipgloss
-github.com/charmbracelet/bubbles
-github.com/charmbracelet/glamour
-github.com/anthropics/anthropic-sdk-go
-github.com/openai/openai-go
-turso.tech/database/tursogo
-github.com/spf13/cobra
-github.com/pelletier/go-toml/v2
-gopkg.in/yaml.v3
-github.com/zalando/go-keyring
-golang.org/x/sync/errgroup
+github.com/charmbracelet/bubbletea    v1.3.10   (M6)
+github.com/charmbracelet/bubbles      v1.0.0    (M6: textarea, viewport)
+github.com/charmbracelet/glamour      v1.0.0    (M6: TUI scrollback only)
+github.com/charmbracelet/lipgloss     v1.1.1-…  (M6, pulled by glamour)
+github.com/anthropics/anthropic-sdk-go  v1.74.0
+github.com/openai/openai-go             v1.12.0
+turso.tech/database/tursogo             (not yet used; TursoBackend is unbuilt)
+github.com/spf13/cobra                  v1.10.2
+github.com/pelletier/go-toml/v2         v2.4.3
+github.com/zalando/go-keyring           v0.2.8
+golang.org/x/sync/errgroup              v0.22.0
+modernc.org/sqlite                      v1.59.0
 ```
+
+`gopkg.in/yaml.v3` parses `PROJECT.md` front matter. Glamour brings a real
+transitive tail — goldmark, chroma, bluemonday, termenv — which is the price of
+not hand-rolling a markdown renderer, and it is confined to `internal/tui`.
 
 Verified present: Go 1.27.1 (arm64), git 2.54.0, sqlite3, `claude` at
-`~/.local/bin/claude`. Not present: `codex`, `aider`.
+`~/.local/bin/claude` (2.1.282 as of M6). Not present: `codex`, `aider`.
 
 ---
 
@@ -1313,7 +1457,10 @@ Each milestone is independently verifiable.
 | M6 | TUI | Bubble Tea chat, items, and projects views |
 
 M1–M4 produce a genuinely useful tool on their own. M5 closes the loop. M6 makes
-it pleasant.
+it pleasant — and adds the one thing none of the earlier milestones could: a
+conversation, which is where learned observations (§6) have something to draw on.
+
+All seven are complete.
 
 ---
 
@@ -1325,9 +1472,8 @@ Not in v1, but the design should not foreclose them:
 - **Multi-user** — all state under one root; schema takes a `user_id` migration.
 - **Non-terminal frontend** — enforced by `tui/` importing downward only.
 - **Retrieval** — unnecessary while digests fit comfortably in context.
-- ~~Apex writing to `PROFILE.md` / `SKILLS.md`~~ — **reversed.** Apex appends
-  learned observations to a marked `## Observed` block in each file; see §6.
-  Implement with M6's chat, which is where extraction has a conversation to draw on.
+- ~~Apex writing to `PROFILE.md` / `SKILLS.md`~~ — **reversed, and built in M6.**
+  Apex maintains a marked `## Observed` block in each file; see §6 and §18.
 
 ---
 
@@ -1399,6 +1545,70 @@ Settled 2026-09-21, previously open:
     just generic advice about code rather than advice for this user, and that
     failure is invisible from the outside.
 
+    **M6 added a fourth state, because M6 broke this check.** Once Apex writes a
+    `## Observed` block into these files (§6), "the file has content" stops
+    answering "the user has written identity context" — a `PROFILE.md` holding
+    nothing but two observations Apex inferred would have passed, silencing the
+    warning at exactly the moment it started mattering. `doctor` and
+    `Context.MissingIdentity` now ask `AuthoredEmpty`, which parses out Apex's
+    block, and a file holding only Apex's own inferences is reported as such.
+    `Document.Empty` keeps its old meaning because the *prompt* wants the whole
+    file, observations included.
+
+    This is the §9 lesson in a different costume: **§6 and §18-13 were written
+    independently, and their interaction was a regression neither one could see.**
+    Whenever a section grants Apex write access to something another section
+    reads as a signal, check that the signal still means what it meant.
+
+14. **Excluding the user's global `CLAUDE.md`** — closed in M6, empirically. See
+    the table in §9. The config-directory approach was ruled out for zero tokens
+    with `claude auth status --json`; `--safe-mode` plus re-supplying the project
+    `CLAUDE.md` was verified by a real dispatch. What a dispatch does and does not
+    inherit is enumerated in §9 rather than left to be discovered, because §9's own
+    standard was that documenting the inheritance beats half-inheriting it.
+
+15. **Glamour** — closed in M6, in the direction §18 item 12 of the previous round
+    anticipated. It is a dependency now, and it renders the TUI's chat scrollback
+    and nothing else. `cmd/apex/render.go` keeps its plain renderer so `apex show
+    AI-003 > note.md` still produces a file rather than escape sequences, and the
+    two renderers are not a duplication to be consolidated: one exists precisely
+    because the other emits ANSI.
+
+16. **Learned observations** — built in M6 against §6, reusing `contextfs`'s
+    marker discipline and atomic writes rather than growing a second copy. A real
+    conversation turn — "I always build my CLIs in Go, and I have been learning
+    Zig on the side" — produced, in one gated call:
+
+    ```
+    PROFILE.md  <!--apex 2026-09-25--> Builds CLIs in Go by default. — source: said 'I always build my CLIs in Go'
+    SKILLS.md   <!--apex 2026-09-25--> Is learning Zig on the side. — source: said they have been learning Zig on the side
+    ```
+
+    Note the split across the two files: a capability went to `SKILLS.md` and a
+    preference to `PROFILE.md`, which is the same distinction the cheap gate
+    screens on.
+
+### When Apex gains write access to something another section reads
+
+§18 had `doctor` warn when identity context is missing, because an empty
+`PROFILE.md` still produces output — just generic advice — and that failure is
+invisible from outside. §6 then made Apex a *writer* of those files. The two were
+written independently, and their interaction is a regression neither could see: after
+two extractions, a `PROFILE.md` containing nothing but Apex's own inferences passes
+the not-empty check. **The warning goes quiet at exactly the moment it starts
+mattering**, and Apex reasons from a persona it invented while `doctor` reports
+everything is fine.
+
+Fixed by teaching `doctor` a third state — "holds only Apex's own observations,
+nothing you wrote" — which requires parsing Apex's block out before judging emptiness,
+while the prompt still receives the whole file.
+
+> **The general rule, and the last one this design earned: whenever a section grants
+> Apex write access to something another section reads as a signal, re-check that the
+> signal still means what it meant.** §7 already has this instinct for schemas, in the
+> one-way-door review for constraints that narrow the accepted write set. This is the
+> same hazard expressed in prose instead of DDL, and prose has no compiler.
+
 ### Still open
 
 - **Turso offline-writes maturity in `tursogo`** — would remove the network
@@ -1417,6 +1627,42 @@ Settled 2026-09-21, previously open:
   let an unattended run meet its own acceptance criteria without granting
   everything.
 
+  **M6 measured what `acceptEdits` actually permits, and the answer changes the
+  shape of the fix.** A real dispatch against 2.1.282 under these exact flags ran
+  `Bash ls -a; cat PROJECT.md` and got the file's contents back — with
+  `permission_denials: []` — while the brief was telling it that it could not run
+  commands at all. A follow-up probe under the same flags:
+
+  | Command | Outcome |
+  |---|---|
+  | `git status --short` | ran |
+  | `mkdir -p .probe && rmdir .probe` | ran |
+  | `go version` | **denied** — "This command requires approval" |
+
+  **Approval is per command, not per mode.** The CLI auto-approves what it judges
+  safe and refers everything else to a prompt that `--permission-prompts none`
+  turns into an automatic denial. So M5's conclusion holds exactly where it
+  matters — `go version` is about as harmless as a toolchain invocation gets and
+  was still denied, so `go build` and `go test` certainly are — while the blanket
+  claim in the brief was false, and false in the direction that makes the agent
+  stop trying. The brief now says "you CANNOT run commands **that build or test
+  this project**", which is accurate and is the sentence the acceptance criteria
+  need.
+
+  The exact denial text is worth keeping, because it is unusually good and Apex
+  does not have to write its own:
+
+  > Permission for this tool use was denied. It requires approval, and this
+  > session has no approval surface — nobody can answer a permission prompt here
+  > — so it was denied automatically. The action was NOT performed; do not claim
+  > it succeeded, and do not retry it […] What required approval: This command
+  > requires approval
+
+  This **strengthens** the `--allowed-tools` case rather than dissolving it. The
+  CLI is already doing per-command allowlisting; it simply does not know that
+  `go build ./...` is this project's verification step. A narrow allowlist would
+  be telling it one true fact, not handing over the machine.
+
 - **What changed is read from git, not from the agent.** M5's second real
   dispatch wrote both its files with shell heredocs rather than the edit tools,
   so the tool-derived file list was empty while the working tree held two new
@@ -1433,12 +1679,21 @@ Settled 2026-09-21, previously open:
   paraphrase. Anything better needs embeddings, which §1 rules out of v1, and the
   failure mode was chosen deliberately: a duplicate the user can dismiss is better
   than a silently dropped item they never see.
-- **Glamour is specced in §3 but not yet a dependency.** M4's listings use a small
-  plain-text renderer in `cmd/apex/render.go` instead, so the milestone added no
-  third-party dependency to make four read-only views look nicer. It emits no ANSI,
-  so `apex show AI-003 > note.md` produces a file rather than escape sequences. M6
-  should take the Glamour decision deliberately, when the TUI actually wants
-  styling.
+- **Observation consolidation is a cap, not a consolidation.** §6 asks for
+  related observations to be "consolidated into single lines when it fills". What
+  ships is the cap (twelve per file) plus a prompt that invites the extractor to
+  replace two narrower claims with one — which only happens on a turn that
+  qualifies for extraction anyway. A block that fills and then goes quiet is
+  truncated from the end, oldest first, with no consolidation pass. A real
+  consolidation would be a second call on a schedule, and it is not obviously
+  worth one.
+
+- **Observation quality has a sample size of one.** The extraction prompt insists
+  that most turns yield nothing, and the one real turn it has seen produced two
+  correct, well-sourced observations. Whether it stays that disciplined over a
+  hundred turns — or slowly fills the cap with near-duplicates — is unmeasured,
+  and the cost of finding out late is that identity context quietly gets worse
+  while looking like it is working.
 - **`apex review <project>` narrows the digest set to one project**, which is
   cheaper and strictly worse: the advisor's whole value is the cross-portfolio
   comparison. It is offered because a user working on one thing will ask for it,

@@ -70,7 +70,16 @@ func runDo(ctx context.Context, w io.Writer, rawID string, opts dispatchOptions)
 		return err
 	}
 	defer sess.Close()
+	return dispatchItem(ctx, w, sess, rawID, opts)
+}
 
+// dispatchItem is runDo against a session the caller already opened.
+//
+// The split exists for M6's TUI, which holds a store open for its whole
+// lifetime and dispatches from the items view: opening a second connection to
+// the same database for the duration of a run would be a second writer against
+// a file that already has one, for no gain.
+func dispatchItem(ctx context.Context, w io.Writer, sess *session, rawID string, opts dispatchOptions) error {
 	// 1. The item, its project, and its digest (DESIGN.md §14).
 	item, err := loadDispatchableItem(ctx, sess, rawID)
 	if err != nil {

@@ -453,6 +453,24 @@ func TestDoctorChecksTheIdentityFiles(t *testing.T) {
 	if got.Level != levelWarn || !strings.Contains(got.Detail, "empty") {
 		t.Errorf("an empty identity file was not reported as such: %+v", got)
 	}
+
+	// And a file holding only what Apex inferred is a third state, not a
+	// fourth way of being fine. M6 made Apex a writer of these files
+	// (DESIGN.md §6), so "has content" stopped answering "the user wrote
+	// identity context" — which is the question §18 item 13 asked for.
+	if err := os.WriteFile(contextfs.SkillsPath(f.root), []byte(
+		"## Observed\n<!--apex 2026-09-25--> Is learning Zig. — source: a remark\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r = &report{}
+	checkIdentity(context.Background(), r)
+	got = findCheck(t, r, "identity context")
+	if got.Level != levelWarn {
+		t.Errorf("a SKILLS.md holding only apex's own observations passed the check: %+v", got)
+	}
+	if !strings.Contains(got.Detail, "only apex's own observations") {
+		t.Errorf("detail = %q, want it to distinguish apex's own inferences from the user's prose", got.Detail)
+	}
 }
 
 // assertNoOrphanLock confirms a finished dispatch left its lock free.
@@ -518,16 +536,23 @@ func TestResultReportsTheWorkingTreeNotTheAgentsClaim(t *testing.T) {
 
 // TestBriefStatesWhatTheAgentMayDo is a finding from the first real dispatch
 // rather than a guess. Under the default permission mode the agent may write
-// files and may not run commands, so its build-and-test command was denied; it
+// files and may not build or test, so its verification command was denied; it
 // spent a turn discovering that and then reported a change it could not
 // verify. The brief now says so up front, either way.
+//
+// M6 narrowed the default's claim from "cannot run commands" to "cannot run
+// commands that build or test", because a real dispatch ran `git status` and
+// `mkdir` fine while `go version` was denied with "This command requires
+// approval". Approval is per command, not per mode. The assertion is on the
+// load-bearing half — that the brief tells the agent it cannot verify its own
+// work — rather than on the false general claim it used to make.
 func TestBriefStatesWhatTheAgentMayDo(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"the default cannot run commands", nil, "CANNOT run commands"},
+		{"the default cannot build or test", nil, "CANNOT run commands that build or test"},
 		{"bypass can", []string{"--bypass-permissions"}, "You may run commands"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

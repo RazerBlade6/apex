@@ -74,6 +74,24 @@ type Executor struct {
 	Default string `toml:"default"`
 	Model   string `toml:"model"`
 	Effort  string `toml:"effort"`
+
+	// InheritUserConfig lets a dispatched agent pick up the user's own
+	// Claude Code configuration: the global ~/.claude/CLAUDE.md, personal
+	// skills, hooks, plugins and settings.
+	//
+	// It defaults to false, and the default is the decision in DESIGN.md §9:
+	// a dispatch inherits the *project* CLAUDE.md and not the user's global
+	// one. Both real M5 dispatches volunteered that they were departing from
+	// a convention in ~/.claude/CLAUDE.md, so personal conventions were
+	// silently shaping every Apex run — and some of them are actively wrong
+	// here ("delegate code generation to a sub-agent" is redundant advice for
+	// a process that *is* the delegation layer).
+	//
+	// The field is named for what it turns on rather than off so that its
+	// absence from an older config.toml means the safe value. M6 settled the
+	// mechanism: see internal/executor/claudecode/memory.go for what a
+	// dispatch does and does not inherit either way.
+	InheritUserConfig bool `toml:"inherit_user_config"`
 }
 
 // Config is the whole of ~/.apex/config.toml.

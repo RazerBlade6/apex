@@ -280,7 +280,15 @@ func checkIdentity(ctx context.Context, r *report) {
 		return
 	}
 
-	var present, missing, empty []string
+	// Three states, not two, since M6. Apex now maintains a `## Observed`
+	// block in both files (DESIGN.md §6), so "the file has content" stopped
+	// being the same question as "the user has written identity context" —
+	// and it is the second one §18 item 13 asked doctor to answer. A
+	// PROFILE.md holding nothing but observations Apex inferred would
+	// otherwise pass this check, silencing the warning at the moment it
+	// started mattering. The states are reported separately because their
+	// fixes differ in tone, not in substance.
+	var present, missing, empty, inferred []string
 	for _, doc := range []struct {
 		file string
 		doc  contextfs.Document
@@ -293,12 +301,15 @@ func checkIdentity(ctx context.Context, r *report) {
 			missing = append(missing, doc.file)
 		case doc.doc.Empty():
 			empty = append(empty, doc.file)
+		case doc.doc.AuthoredEmpty():
+			inferred = append(inferred, doc.file)
 		default:
-			present = append(present, fmt.Sprintf("%s (%d bytes)", doc.file, len(doc.doc.Body)))
+			present = append(present, fmt.Sprintf("%s (%d bytes you wrote)",
+				doc.file, len(doc.doc.AuthoredBody())))
 		}
 	}
 
-	if len(missing) == 0 && len(empty) == 0 {
+	if len(missing) == 0 && len(empty) == 0 && len(inferred) == 0 {
 		r.ok(name, strings.Join(present, ", ")+" in "+contextfs.ContextDir(root))
 		return
 	}
@@ -313,11 +324,17 @@ func checkIdentity(ctx context.Context, r *report) {
 	if len(empty) > 0 {
 		detail = append(detail, strings.Join(empty, " and ")+" present but empty")
 	}
+	if len(inferred) > 0 {
+		detail = append(detail, strings.Join(inferred, " and ")+
+			" holds only apex's own observations, nothing you wrote")
+	}
+	needsWriting := append(append(append([]string{}, missing...), empty...), inferred...)
 	r.warn(name, strings.Join(detail, "; "),
 		fmt.Sprintf("write %s in %s\n"+
 			"apex loads both into every advisor call; without them review and ideas reason from\n"+
-			"project digests alone and produce generic advice about the code rather than advice for you",
-			strings.Join(append(missing, empty...), " and "), contextfs.ContextDir(root)))
+			"project digests alone and produce generic advice about the code rather than advice for you\n"+
+			"apex profile   shows what apex has inferred on its own",
+			strings.Join(needsWriting, " and "), contextfs.ContextDir(root)))
 }
 
 func checkGoToolchain(ctx context.Context, r *report) {

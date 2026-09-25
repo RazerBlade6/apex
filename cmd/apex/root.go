@@ -7,7 +7,7 @@ import (
 // version is the build version, overridable at link time:
 //
 //	go build -ldflags "-X main.version=1.2.3" ./cmd/apex
-var version = "0.1.0-dev (M5)"
+var version = "0.1.0 (M6)"
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
@@ -16,25 +16,30 @@ func newRootCmd() *cobra.Command {
 		Long: `Apex holds context about you and your projects, generates action items
 and project ideas, and dispatches implementation work to a coding agent.
 
-This build implements milestones M1 through M5: the CLI skeleton,
+Run with no arguments it opens the terminal interface: chat with your whole
+portfolio in context, browse action items and dispatch one, and review the
+registry with its digests. Every view is also a command, so the same work is
+scriptable and cron-able.
+
+This build implements milestones M1 through M6: the CLI skeleton,
 configuration, credentials, storage, environment verification, the context
 layer, the provider adapters — including claude-cli, which runs inference
-through a Claude subscription rather than an API key — the advisor loop, and
-the executor that closes it. The TUI arrives with M6.
+through a Claude subscription rather than an API key — the advisor loop, the
+executor that closes it, and the TUI.
 
-Five commands reach a model. sync, review and ideas run the advisor loop,
-which emits text. do and start run the builder loop, which writes code: they
+Six commands reach a model. sync, review and ideas run the advisor loop, which
+emits text. do and start run the builder loop, which writes code: they
 dispatch a brief to a coding agent working inside the project directory, under
 an exclusive per-project lock, and spend Claude Code subscription quota rather
-than an API key. doctor reaches a model only with --probe; items and show read
-the database and cost nothing.`,
+than an API key. The chat view reaches a model per turn, and spends one extra
+cheap call on a turn that looks like it says something durable about you.
+doctor reaches a model only with --probe; items, show, config and profile read
+local state and cost nothing.`,
 		Version:       version,
 		SilenceUsage:  true, // a runtime failure is not a usage error
 		SilenceErrors: true, // main formats errors itself
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// The bare `apex` invocation launches the TUI from M6 onwards.
-			// Until then, showing help beats a silent no-op.
-			return cmd.Help()
+			return runTUI(cmd.Context(), nil, nil)
 		},
 	}
 
@@ -42,7 +47,7 @@ the database and cost nothing.`,
 	root.AddCommand(
 		newDoctorCmd(), newConfigCmd(), newSyncCmd(),
 		newReviewCmd(), newIdeasCmd(), newItemsCmd(), newShowCmd(),
-		newDoCmd(), newStartCmd(),
+		newDoCmd(), newStartCmd(), newProfileCmd(),
 	)
 	return root
 }

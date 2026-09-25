@@ -35,7 +35,9 @@ comfortably in context, ten repositories do not.
 - Go 1.27+
 - git
 - An Anthropic and/or OpenAI API key (for the advisor loop)
-- [Claude Code](https://claude.com/claude-code) (for the builder loop, once M5 lands)
+- [Claude Code](https://claude.com/claude-code) — for the builder loop, and optionally
+  for the advisor loop too: a Pro or Max subscription can serve inference instead
+  of an API key
 
 ## Install
 
@@ -50,16 +52,29 @@ a single static binary.
 
 ## Usage
 
-What works today:
-
 ```sh
+apex           # the terminal interface: chat, action items, projects
+
 apex doctor    # verify toolchain, keys, config, and migration state
 apex config    # show resolved configuration and where each key came from
+apex sync      # refresh the registry and regenerate stale project digests
+apex review    # propose action items across the whole portfolio
+apex ideas     # propose new projects that fit you
+apex items     # list action items, grouped by project
+apex show <id> # one action item or idea in full
+apex do <id>   # dispatch an action item to the coding agent
+apex start <id># scaffold a new project from an idea
+apex profile   # what apex has learned about you; --forget <n> to drop one
 ```
 
 `apex doctor` is the place to start. It checks every assumption Apex makes about
 your machine and tells you specifically what's wrong and how to fix it, rather than
 failing later with something cryptic.
+
+Everything the interface does is also a command, so the same work is scriptable and
+cron-able. `items`, `show`, `config` and `profile` read local state and cost
+nothing; `sync`, `review`, `ideas` and the chat view reach a model; `do` and `start`
+dispatch a coding agent.
 
 ## Configuration
 
@@ -130,13 +145,16 @@ Chunking strategy loses table context, so numeric questions fail.
 | | Milestone | Status |
 |---|---|---|
 | M1 | Skeleton — config, storage, migrations, locking, `doctor` | done |
-| M2 | Context — markdown parsing, registry, git introspection | next |
-| M3 | Providers — Anthropic and OpenAI, streaming and structured output | |
-| M4 | Advisor — digests, `review`, `ideas`, `items` | |
-| M5 | Executor — dispatch, `do`, `start` | |
-| M6 | TUI — chat, items, and projects views | |
+| M2 | Context — markdown parsing, registry, git introspection | done |
+| M3 | Providers — Anthropic and OpenAI, streaming and structured output | done |
+| M3.5 | Subscription provider — run the advisor loop through Claude Pro | done |
+| M4 | Advisor — digests, `review`, `ideas`, `items`, `show` | done |
+| M5 | Executor — dispatch, `do`, `start` | done |
+| M6 | TUI — chat, items and projects views; learned observations | done |
 
-M1–M4 produce a genuinely useful tool. M5 closes the loop. M6 makes it pleasant.
+M1–M4 produce a genuinely useful tool. M5 closes the loop. M6 makes it pleasant —
+and adds the one thing the earlier milestones could not: a conversation, which is
+where Apex learns anything about you that you did not write down yourself.
 
 ## Design
 

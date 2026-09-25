@@ -95,6 +95,11 @@ type Options struct {
 	// Timeout bounds one dispatch. Zero means none, which is right for an
 	// interactive run the user can interrupt and wrong for a cron job.
 	Timeout time.Duration
+	// InheritUserConfig lets the dispatched agent pick up the user's own
+	// Claude Code configuration — the global ~/.claude/CLAUDE.md, personal
+	// skills, hooks, plugins and settings. It defaults to false; see
+	// ProjectMemoryHeading for why.
+	InheritUserConfig bool
 }
 
 // Executor dispatches to the claude CLI.
@@ -173,7 +178,9 @@ func (e *Executor) permissionMode() string {
 //   - --append-system-prompt: the brief. APPEND rather than replace, because
 //     the CLI's own system prompt is what makes it a competent coding agent;
 //     replacing it would throw that away to say the same thing worse.
-func (e *Executor) argv(brief executor.TaskBrief) []string {
+//   - --safe-mode: the mechanism DESIGN.md §9 left open. See
+//     ProjectMemoryHeading.
+func (e *Executor) argv(brief executor.TaskBrief, projectMemory string) []string {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -181,6 +188,9 @@ func (e *Executor) argv(brief executor.TaskBrief) []string {
 		"--verbose",
 		"--permission-mode", e.permissionMode(),
 		"--permission-prompts", "none",
+	}
+	if !e.opts.InheritUserConfig {
+		args = append(args, "--safe-mode")
 	}
 	if id := strings.TrimSpace(brief.SessionID); id != "" {
 		args = append(args, "--session-id", id)
@@ -191,7 +201,7 @@ func (e *Executor) argv(brief executor.TaskBrief) []string {
 	if f := e.effort(); f != "" {
 		args = append(args, "--effort", f)
 	}
-	args = append(args, "--append-system-prompt", brief.Instruction)
+	args = append(args, "--append-system-prompt", systemPrompt(brief, projectMemory))
 
 	// The positional prompt. The brief itself is the system prompt, so this
 	// is the turn that starts the work: short, imperative, and pointing at
@@ -256,7 +266,20 @@ func (e *Executor) run(ctx context.Context, bin string, brief executor.TaskBrief
 		defer cancel()
 	}
 
-	args := e.argv(brief)
+	// The project's own CLAUDE.md, re-supplied because --safe-mode disabled
+	// the discovery that would otherwise have found it (see memory.go). A
+	// read failure is not fatal: a dispatch with no project conventions is
+	// worse than one with them, and far better than none at all.
+	var projectMemory string
+	if !e.opts.InheritUserConfig {
+		body, err := readProjectMemory(brief.ProjectPath)
+		if err != nil {
+			executor.Emit(ctx, ch, executor.Event{Type: executor.EventNotice, Text: err.Error()})
+		}
+		projectMemory = body
+	}
+
+	args := e.argv(brief, projectMemory)
 	started := time.Now()
 	log.header(bin, args, brief, started)
 

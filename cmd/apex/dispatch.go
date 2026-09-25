@@ -62,10 +62,11 @@ var newExecutor = func(cfg *config.Config, opts dispatchOptions) (executor.Execu
 	switch cfg.Executor.Default {
 	case claudecode.Name:
 		return claudecode.New(claudecode.Options{
-			Model:          model,
-			Effort:         effort,
-			PermissionMode: mode,
-			Timeout:        opts.Timeout,
+			Model:             model,
+			Effort:            effort,
+			PermissionMode:    mode,
+			Timeout:           opts.Timeout,
+			InheritUserConfig: cfg.Executor.InheritUserConfig,
 		}), nil
 	default:
 		return nil, &unknownExecutorError{Name: cfg.Executor.Default, ConfigPath: cfg.Path()}
@@ -224,14 +225,39 @@ func runDispatch(ctx context.Context, w io.Writer, sess *session, exec executor.
 // the other half, and it stays opt-in per DESIGN.md §9: granting an
 // unattended agent every permission in a project directory is a decision the
 // user should make on purpose, not one Apex makes for them.
+//
+// M6 corrected the wording, and the correction came from measurement rather
+// than from reading the flags. A real dispatch against claude 2.1.282 under
+// exactly these flags ran `Bash ls -a; cat PROJECT.md` and got the file's
+// contents back — while the brief was telling it that it could not run
+// commands at all. A follow-up probe under the same flags established what is
+// actually happening:
+//
+//	git status --short            ran
+//	mkdir -p .probe && rmdir      ran
+//	go version                    DENIED, "This command requires approval"
+//
+// **Approval is per command, not per mode.** The CLI auto-approves what it
+// considers safe and refers everything else to a prompt that, under
+// --permission-prompts none, is an automatic denial. So M5's conclusion holds
+// exactly where it matters — a toolchain invocation is denied, and `go version`
+// is about as harmless as one gets — while the blanket claim was false and made
+// the agent stop trying.
+//
+// The brief therefore states the specific thing rather than the general one:
+// some commands run, build and test commands are denied, so the run cannot
+// verify its own work and must say which criteria it could not check. That is
+// accurate, and it is the sentence the acceptance criteria actually need.
 func permissionConstraint(bypass bool) string {
 	if bypass {
 		return "You may run commands in this directory, including builds and tests. " +
 			"Verify your change rather than asserting it works."
 	}
-	return "You can edit files but you CANNOT run commands in this run: anything needing approval " +
-		"is denied automatically, with no prompt. Do not retry a denied command. Make the change, " +
-		"then state plainly which acceptance criteria you could not verify and what the user should run."
+	return "You can edit files, and some shell commands will run — reading files, `git status`. " +
+		"But you CANNOT run commands that build or test this project: those need approval, " +
+		"nobody is watching to give it, and they are denied automatically with no prompt. " +
+		"Never retry a denied command. Make the change, then state plainly which acceptance " +
+		"criteria you could not verify and what the user should run."
 }
 
 // stream drains the executor's events onto the terminal.

@@ -58,18 +58,24 @@ func (a *Advisor) LoadContext(ctx context.Context) (*Context, error) {
 	return &Context{Identity: identity, Digests: digests, Projects: byslug}, nil
 }
 
-// MissingIdentity names the identity documents that do not exist or are empty.
+// MissingIdentity names the identity documents the user has not written.
 //
 // Commands print this rather than swallowing it. On a machine where neither
 // file has been written — which is the state this feature ships into — every
 // advisor call is reasoning from project digests alone, and a user deserves
 // to know that before they judge the output.
+//
+// It asks AuthoredEmpty rather than Empty, and M6 is why: Apex now writes a
+// `## Observed` block into both files (§6), so a file holding nothing but
+// observations Apex inferred would otherwise report as identity context the
+// user had supplied. The warning would go quiet at exactly the moment it
+// started being worth making.
 func (c *Context) MissingIdentity() []string {
 	var missing []string
-	if c.Identity.Profile.Empty() {
+	if c.Identity.Profile.AuthoredEmpty() {
 		missing = append(missing, contextfs.ProfileFile)
 	}
-	if c.Identity.Skills.Empty() {
+	if c.Identity.Skills.AuthoredEmpty() {
 		missing = append(missing, contextfs.SkillsFile)
 	}
 	return missing
