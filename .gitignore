@@ -1,6 +1,7 @@
 # Build output
 /apex
 /dist/
+PROJECT.md
 
 # Local databases (real state lives in ~/.apex, but keep strays out)
 *.db
