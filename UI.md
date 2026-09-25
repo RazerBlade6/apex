@@ -149,7 +149,32 @@ row rendered with it is padded out to the full inner width first: a highlight
 that stops where the text stops reads as a rendering fault rather than as a
 cursor.
 
-## 4. What is checked mechanically
+## 4. Never ask the terminal a question while the program is running
+
+Some terminal facts are not local lookups. Asking for the background colour
+writes an OSC 11 query and reads the terminal's reply back off stdin, and that
+makes *when* it is asked part of the contract.
+
+Before the Bubble Tea program starts, the library doing the asking consumes its
+own reply and all is well. Afterwards, Bubble Tea owns stdin: the reply is read
+by its input loop, delivered as ordinary keystrokes, and typed into whatever
+has focus. Apex shipped exactly that in v1.1.0 — Glamour's `WithAutoStyle`
+resolves light or dark by asking, the renderer is rebuilt whenever the wrap
+width changes, and the first `WindowSizeMsg` arrives immediately after start.
+The TUI opened with `11;rgb:2828/2c2c/3434` already typed into the chat input,
+and again on every resize.
+
+So the Glamour style is resolved once, by name, in `New`, which runs before
+`p.Run()`, and every later rebuild reuses that name. `GLAMOUR_STYLE` overrides
+it, and a stdout that is not a character device resolves to `notty` without
+asking anything, because a redirected TUI should not be writing escape
+sequences into a file.
+
+The general rule: anything that probes the terminal belongs before the program
+starts. Nothing in the rendered output can reveal a breach of it, which is why
+`TestGlamourStyleIsResolvedBeforeTheProgramStarts` counts the lookups instead.
+
+## 5. What is checked mechanically
 
 A layout cannot be unit-tested into being attractive, but it can be stopped from
 being broken. Two tests do that, and neither should be weakened to make a change
@@ -164,6 +189,9 @@ pass:
   speaker, and that the fallback predicate is still false at a narrow width, so
   that removing the fallback fails rather than silently producing a ten-column
   pane.
+- **`TestGlamourStyleIsResolvedBeforeTheProgramStarts`** counts style lookups
+  and fails if a resize causes a second one, which is the only way to catch §4
+  from inside a test.
 
 Note what neither of them can see. A too-narrow block still fits, so a
 miscalculation that renders the pair four columns short of the frame passes both

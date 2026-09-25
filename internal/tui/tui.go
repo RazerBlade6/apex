@@ -112,6 +112,10 @@ type Model struct {
 	projects projectsState
 
 	render *renderer
+	// glamourStyle is the style name resolved at construction and reused for
+	// every later rebuild, so that no terminal query happens while the
+	// program holds stdin.
+	glamourStyle string
 }
 
 type statusKind int
@@ -126,7 +130,10 @@ const (
 // and View directly.
 func New(opts Options) *Model {
 	m := &Model{opts: opts, width: 80, height: 24}
-	m.render = newRenderer(m.replyWidth())
+	// Resolved once, here, because New runs before the Bubble Tea program
+	// starts and this asks the terminal a question (see detectGlamourStyle).
+	m.glamourStyle = detectStyle()
+	m.render = newRenderer(m.replyWidth(), m.glamourStyle)
 	m.initChat()
 	m.initItems()
 	m.layout()
@@ -176,7 +183,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
-		m.render = newRenderer(m.replyWidth())
+		m.render = newRenderer(m.replyWidth(), m.glamourStyle)
 		m.layout()
 		// The cached renders were measured against the old frame, and a resize
 		// can cross the two-pane threshold as well as change the wrap width.

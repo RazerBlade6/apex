@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
@@ -154,15 +156,49 @@ type renderer struct {
 	width int
 }
 
-// newRenderer builds the renderer the application uses.
+// detectStyle is a variable so that the test can prove the resolution happens
+// once, at construction, and never again from Update.
+var detectStyle = detectGlamourStyle
+
+// detectGlamourStyle resolves the Glamour style by name, once, and must only
+// be called before the Bubble Tea program starts.
 //
-// WithAutoStyle picks light or dark from the terminal, and falls back to an
-// unstyled "notty" profile when there is no terminal to ask — which is exactly
-// right: a TUI launched with its output redirected should not be writing
-// escape sequences into a file. It does mean styling cannot be asserted
-// without naming a style, which is what buildRenderer is for.
-func newRenderer(width int) *renderer {
-	return buildRenderer(width, glamour.WithAutoStyle())
+// Glamour's WithAutoStyle asks termenv for the terminal's background colour.
+// That is not a local lookup: it writes an OSC 11 query to the terminal and
+// reads the terminal's reply back off stdin. Before the program starts that is
+// fine, because termenv consumes its own reply. Afterwards it is a bug — Bubble
+// Tea owns stdin by then, so the reply is read by its input loop and delivered
+// as ordinary keystrokes, and the user opens the TUI to find
+// `11;rgb:2828/2c2c/3434` already typed into the chat input.
+//
+// The renderer is rebuilt whenever the wrap width changes, so the query fired
+// on the first WindowSizeMsg — which arrives immediately after start — and
+// again on every resize. Resolving the name once here and reusing it is what
+// keeps the query on the safe side of p.Run().
+//
+// lipgloss caches its own detection behind a sync.Once, so this costs one
+// query for the life of the process.
+func detectGlamourStyle() string {
+	if s := os.Getenv("GLAMOUR_STYLE"); s != "" {
+		return s
+	}
+	// No terminal to style for, and none to ask either: a redirected stdout
+	// has no background colour to report, and a TUI whose output is going to
+	// a file should not be writing escape sequences into it.
+	if fi, err := os.Stdout.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return styles.NoTTYStyle
+	}
+	if lipgloss.HasDarkBackground() {
+		return styles.DarkStyle
+	}
+	return styles.LightStyle
+}
+
+// newRenderer builds the renderer the application uses, at an already-resolved
+// style name. Naming the style rather than asking for "auto" is the whole
+// point; see detectGlamourStyle.
+func newRenderer(width int, style string) *renderer {
+	return buildRenderer(width, glamour.WithStandardStyle(style))
 }
 
 func buildRenderer(width int, style glamour.TermRendererOption) *renderer {

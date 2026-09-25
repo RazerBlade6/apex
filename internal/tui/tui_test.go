@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/RazerBlade6/apex/internal/advisor"
@@ -460,5 +461,47 @@ func TestChatPanesSplitSpeakers(t *testing.T) {
 		if !strings.Contains(single, want) {
 			t.Errorf("the fallback scrollback is missing %q:\n%s", want, single)
 		}
+	}
+}
+
+// TestGlamourStyleIsResolvedBeforeTheProgramStarts is the regression test for
+// `11;rgb:2828/2c2c/3434` appearing already typed into the chat input the
+// moment the TUI opened.
+//
+// Resolving Glamour's "auto" style asks termenv for the terminal's background
+// colour, and that is not a local lookup: it writes an OSC 11 query to the
+// terminal and reads the reply back off stdin. The renderer is rebuilt
+// whenever the wrap width changes, so the query ran on the first
+// WindowSizeMsg — which arrives immediately after start — by which point
+// Bubble Tea owned stdin. The terminal's reply came back through its input
+// loop as ordinary keystrokes and landed in the focused textarea.
+//
+// The fix is that the style is resolved once, in New, before the program
+// starts. Nothing about the rendered output can show that, so what is asserted
+// is the lookup count: it must not move once the model exists, however many
+// resizes arrive.
+func TestGlamourStyleIsResolvedBeforeTheProgramStarts(t *testing.T) {
+	var calls int
+	orig := detectStyle
+	detectStyle = func() string { calls++; return styles.NoTTYStyle }
+	t.Cleanup(func() { detectStyle = orig })
+
+	m := newTestModel(t, nil) // New, then one WindowSizeMsg
+	if calls != 1 {
+		t.Fatalf("construction resolved the style %d times, want exactly 1", calls)
+	}
+
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 100, Height: 30}, {Width: 80, Height: 24}, {Width: 200, Height: 50},
+	} {
+		m.Update(size)
+	}
+	if calls != 1 {
+		t.Errorf("a resize re-resolved the style: %d lookups, want 1 — the OSC 11 "+
+			"query is back inside the running program, and its reply will be typed "+
+			"into the chat input", calls)
+	}
+	if m.glamourStyle == "" {
+		t.Error("the model did not keep the resolved style name")
 	}
 }

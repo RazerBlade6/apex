@@ -78,7 +78,7 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 ### Build with a version stamp
 
 ```sh
-go build -ldflags "-X main.version=1.1.0" -o apex ./cmd/apex
+go build -ldflags "-X main.version=1.1.1" -o apex ./cmd/apex
 ```
 
 ### Cross-compile
@@ -205,7 +205,7 @@ the same measure as the answer to it:
 │ │ ›                       │ │ │                                                          │
 │ ╰─────────────────────────╯ │ │                                                          │
 ╰─────────────────────────────╯ ╰──────────────────────────────────────────────────────────╯
-  tab views · enter send · esc stop · ctrl+c quit                               apex 1.1.0
+  tab views · enter send · esc stop · ctrl+c quit                               apex 1.1.1
 ```
 
 Items and Projects keep a single pane. Below 60 columns of content, Chat falls back to one
@@ -221,7 +221,7 @@ as well, rather than rendering two unreadably narrow ones:
 │   AI-002  accepted     small   Cache embeddings between runs                             │
 │                                                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────╯
-  tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit      apex 1.1.0
+  tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit      apex 1.1.1
 ```
 
 The palette is [gruvbox](https://github.com/morhetz/gruvbox) dark, written as truecolor hex
