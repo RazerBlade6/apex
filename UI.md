@@ -1,7 +1,7 @@
 # Apex UI
 
 The visual contract for the terminal interface: the frame and its arithmetic,
-the layout of the chat view, and the palette.
+the layouts of the chat and items views, and the palette.
 
 This is separate from DESIGN.md because the two change on different clocks.
 DESIGN.md is the architecture, and by v1 most of it is settled; how the
@@ -121,7 +121,91 @@ sentence wraps onto two of the three input rows in a narrow left pane, each
 carrying its own prompt glyph, which reads as three empty inputs rather than
 one.
 
-## 3. The palette
+## 3. The items view is three boxes
+
+An action item is not a line of text. It belongs to a project whose state is
+the reason it exists, and it carries a body and a rationale that a one-line row
+can only cut off. So the items view is three boxes: on the left, the project the
+selected item belongs to; in the middle, the items themselves; on the right, the
+selected item in full.
+
+Each box pays `paneChrome` and two `paneGap` columns sit between them, so against
+the single box the trio has ten columns fewer to share:
+
+```
+leftInner + midInner + rightInner = innerWidth + 4 - 3×4 - 2 = innerWidth - 10
+leftInner = rightInner            = round(0.30 × (innerWidth - 10))
+midInner                          = (innerWidth - 10) - leftInner - rightInner
+```
+
+The sides are rounded once and the middle is derived by subtraction, for the
+same reason as chat's right pane: three independent roundings disagree with the
+frame at some widths. The three boxes then render exactly `frameWidth` wide. The
+middle and right boxes carry their gap as a left margin, as chat's output pane
+does. Thirty, forty, thirty gives the list the widest column, because it is the
+one being navigated, and the two sides the same, because neither is more
+important than the other.
+
+**The fallback.** Three boxes need room: below 76 inner columns or 10 body rows
+the view reverts to exactly the layout it had before — one box, the list, and
+the dispatch log below it when there is one. 76 is chosen so that an
+80-column terminal still gets three panes, with sides of twenty columns and a
+card text width of twenty-two. Above that threshold the three boxes are the
+page's shape, not a reward for having data: while it is loading, when the load
+failed, when there are no items and when the filter admits none, the sentence
+saying so sits in the middle box, where the cards would be, and the two side
+boxes are empty. A page that changed shape between an empty database and a full
+one would look like two different pages, and the first one anyone sees is the
+empty one.
+
+**Selection.** The page opens with nothing selected: the cards are drawn, and
+the side boxes are blank rather than describing whichever item happened to sort
+first — which `enter` would otherwise have offered to dispatch without the user
+ever having chosen it. `↑` or `↓` selects the first item, and from then on moves
+the selection; `esc` returns to nothing selected, after first clearing a
+finished dispatch's log if one is covering the right box. The selection is kept
+by item id, not by row, across a reload, a filter change and the reload that
+follows a dispatch, so a rebuilt list cannot slide a different item under the
+cursor; an item the rebuild no longer shows leaves nothing selected. It
+survives switching tabs, so only the first visit is empty.
+
+**Cards.** Each item in the middle box is its own small rounded box, as wide as
+the pane, under a one-line heading for its project; the list is grouped by
+project exactly as the single-box list is. A card is always four rows — two
+border rows around a title line and a line with the id, the age and the status —
+and the fixed height is what keeps scrolling arithmetic rather than
+measurement. The list scrolls by line, not by item, so that the selected card is
+always whole on screen; when it is the first card in its group the heading above
+it is kept in view too, because a card whose project has scrolled off has lost
+its context. When a card is narrow the age gives way before the id or the status.
+
+A card's border says what it is: the ordinary border colour normally, off-blue
+when it is selected, and orange while it is waiting for the `y` or `n` that
+confirms a dispatch — the same orange as a warning, because that is what the
+confirmation is.
+
+**The width rule, again, harder.** Every line put inside a pane or a card has to
+be no wider than that pane, or lipgloss wraps it, the pane grows a row, and
+`MaxHeight` takes that row out of the bottom border. The frame does not get any
+wider or taller when that happens, which is what makes it easy to miss. Wrapping
+is not enough to prevent it, because wrapping breaks on whitespace and a path or
+a URL has none: every line is wrapped and then truncated. Both happen before any
+styling, because truncation counts runes, and an escape sequence is runes.
+
+**Git state is read lazily.** The left box shows the project's branch, head,
+whether the tree is clean, and its latest commit. That is six `git`
+subprocesses, so it is read per project, off the event loop, the first time an
+item from that project is selected, and cached until `r` reloads the view or a
+dispatch into that project finishes — the agent will have changed its files.
+Until the read returns, the box says so. Reading the whole portfolio on every
+reload would be the slowest thing the TUI does, in order to show one project.
+
+The right box scrolls on its own with `pgup` and `pgdn` (or `ctrl+u` and
+`ctrl+d`), half a pane at a time, and says there is more with a `…` on its last
+row. While a dispatch runs, and until `esc` clears it afterwards, the right box
+shows the dispatch log instead of the item.
+
+## 4. The palette
 
 Gruvbox dark, written as hex rather than 256-colour indices. lipgloss hands
 every colour to termenv, which downsamples it to the nearest entry the terminal
@@ -140,6 +224,8 @@ picking an index that is already an approximation everywhere.
 | done, healthy | `#b8bb26` | green |
 | selected row | `#fbf1c7` on `#3c3836` | brightest on dark grey |
 | the border | `#665c54` | dark grey |
+| selected card border | `#83a598` | off-blue |
+| card awaiting confirmation | `#fe8019` | orange |
 
 Warnings are orange rather than gruvbox's yellow because yellow is the colour of
 a section label, and a warning that looks like a heading is not doing its job.
@@ -149,7 +235,7 @@ row rendered with it is padded out to the full inner width first: a highlight
 that stops where the text stops reads as a rendering fault rather than as a
 cursor.
 
-## 4. Never ask the terminal a question while the program is running
+## 5. Never ask the terminal a question while the program is running
 
 Some terminal facts are not local lookups. Asking for the background colour
 writes an OSC 11 query and reads the terminal's reply back off stdin, and that
@@ -174,26 +260,43 @@ The general rule: anything that probes the terminal belongs before the program
 starts. Nothing in the rendered output can reveal a breach of it, which is why
 `TestGlamourStyleIsResolvedBeforeTheProgramStarts` counts the lookups instead.
 
-## 5. What is checked mechanically
+## 6. What is checked mechanically
 
 A layout cannot be unit-tested into being attractive, but it can be stopped from
-being broken. Two tests do that, and neither should be weakened to make a change
-pass:
+being broken. These tests do that, and none of them should be weakened to make a
+change pass:
 
 - **`TestFrameFitsTheTerminal`** renders all three views at five sizes,
   including a deliberately cramped one, and asserts that no line is wider than
   the terminal and no frame taller. It is the only test that measures the whole
-  frame rather than one view's body, and it covers both chat layouts: its widest
-  three sizes take the two panes, its narrowest two take the fallback.
+  frame rather than one view's body, and it covers both chat layouts and both
+  items layouts: its widest three sizes take the panes, its narrowest two take
+  the fallback. It also checks that every box opening on the body's top row
+  closes on its bottom row, which is the only symptom of a line too wide for its
+  pane (§3), and its items fixture carries a path longer than any pane to
+  provoke one. The items view is rendered three times at each size: as it
+  opens, with nothing selected; with the item selected, so that the path goes
+  through the side boxes; and with no items at all.
 - **`TestChatPanesSplitSpeakers`** asserts that each pane holds only its own
   speaker, and that the fallback predicate is still false at a narrow width, so
   that removing the fallback fails rather than silently producing a ten-column
   pane.
+- **`TestItemsPanesFollowTheSelection`** renders the items view's side panes one
+  at a time and asserts that they describe the item under the cursor — the three
+  panes share every line of the frame, so asserting on the frame would find the
+  wrong project's digest just as happily as the right one — that git state
+  delivered while another view is focused still arrives, and that the fallback
+  predicate is false at a narrow width.
+- **`TestItemsStartWithNothingSelected`** asserts that the side boxes are blank
+  until something is selected, that no git read starts before then, that `esc`
+  empties them again, that a reload keeps the selection by id, and that an empty
+  database still gets three boxes with the reason in the middle one.
 - **`TestGlamourStyleIsResolvedBeforeTheProgramStarts`** counts style lookups
-  and fails if a resize causes a second one, which is the only way to catch §4
+  and fails if a resize causes a second one, which is the only way to catch §5
   from inside a test.
 
-Note what neither of them can see. A too-narrow block still fits, so a
-miscalculation that renders the pair four columns short of the frame passes both
+Note what none of them can see. A too-narrow block still fits, so a
+miscalculation that renders the panes four columns short of the frame passes all
+of them
 — that one was caught by rendering frames and reading them, which remains the
 only way to check that the result looks like anything.

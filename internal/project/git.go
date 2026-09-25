@@ -48,6 +48,11 @@ type GitState struct {
 	StatusRaw string
 	// Log is `git log --oneline -20`, newest first.
 	Log []string
+	// LastCommit is HEAD's committer date, or the zero time in a repository
+	// with no commits. It is for display only and deliberately not part of
+	// the source hash: Head already moves whenever it does, so hashing it too
+	// would add no information.
+	LastCommit time.Time
 	// Note explains why the state is absent or partial, for the sync report.
 	// It is empty when everything was read cleanly.
 	Note string
@@ -146,6 +151,17 @@ func InspectGit(ctx context.Context, dir string) (GitState, error) {
 	if g.Head != "" {
 		if log, err := gitOutput(ctx, dir, "log", "--oneline", fmt.Sprintf("-%d", logLimit)); err == nil {
 			g.Log = splitNonEmptyLines(log)
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return GitState{}, ctxErr
+		}
+		// The committer date rather than the author date, because a rebase
+		// or a cherry-pick is when the commit landed here. A date that will
+		// not parse is left zero: it is a nicety for the items view, not
+		// something worth failing the read over.
+		if date, err := gitOutput(ctx, dir, "log", "-1", "--format=%cI"); err == nil {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(date)); err == nil {
+				g.LastCommit = t
+			}
 		} else if ctxErr := ctx.Err(); ctxErr != nil {
 			return GitState{}, ctxErr
 		}

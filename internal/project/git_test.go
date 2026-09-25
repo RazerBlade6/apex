@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireGit skips a test when git is not installed. Every other test in this
@@ -97,6 +98,9 @@ func TestInspectGit(t *testing.T) {
 		if len(g.Log) != 0 {
 			t.Errorf("Log = %v, want empty", g.Log)
 		}
+		if !g.LastCommit.IsZero() {
+			t.Errorf("LastCommit = %v, want zero with no commits", g.LastCommit)
+		}
 		if !strings.Contains(g.Describe(), "no commits") {
 			t.Errorf("Describe = %q, want it to say there are no commits", g.Describe())
 		}
@@ -131,6 +135,9 @@ func TestInspectGit(t *testing.T) {
 		}
 		if !strings.Contains(g.Log[0], "second") {
 			t.Errorf("Log[0] = %q, want the newest commit first", g.Log[0])
+		}
+		if age := time.Since(g.LastCommit); g.LastCommit.IsZero() || age < -time.Minute || age > 5*time.Minute {
+			t.Errorf("LastCommit = %v, want the commit just made", g.LastCommit)
 		}
 		if g.Note != "" {
 			t.Errorf("Note = %q, want empty for a clean read", g.Note)

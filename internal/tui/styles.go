@@ -20,7 +20,7 @@ import (
 // it is and Glamour renders only into the TUI's own scrollback, which is never
 // redirected anywhere.
 
-// The palette is gruvbox dark, named as truecolor hex (UI.md §3).
+// The palette is gruvbox dark, named as truecolor hex (UI.md §4).
 //
 // Hex rather than 256-colour indices because lipgloss hands the colour to
 // termenv, which downsamples it to the nearest entry the terminal actually
@@ -60,6 +60,9 @@ var (
 	// rather than as a cursor.
 	styleSelected = lipgloss.NewStyle().Foreground(colFG0).Background(colBG1).Bold(true)
 	styleLabel    = lipgloss.NewStyle().Foreground(colYellow).Bold(true)
+	// styleTitle is an item's title where it is the thing being looked at:
+	// the selected card, and the head of the detail pane.
+	styleTitle = lipgloss.NewStyle().Foreground(colFG0).Bold(true)
 
 	// styleBox is the bounding box around the content area. Width is set per
 	// frame, because it depends on the terminal.
@@ -68,10 +71,11 @@ var (
 			BorderForeground(colBG3).
 			Padding(0, 1)
 
-	// styleBoxRight is the chat view's output pane. The one column between the
-	// two panes is its left margin rather than a spacer string, so that
-	// JoinHorizontal cannot lose it — and chatPaneWidths counts it, because a
-	// margin widens the rendered block.
+	// styleBoxRight is any pane with a pane to its left: chat's output pane,
+	// and the items view's middle and right. The one column between two panes
+	// is its left margin rather than a spacer string, so that JoinHorizontal
+	// cannot lose it — and the width arithmetic counts it, because a margin
+	// widens the rendered block.
 	styleBoxRight = styleBox.MarginLeft(paneGap)
 )
 
@@ -121,6 +125,31 @@ const (
 	// stops being one, and chat falls back to a single box.
 	minTwoPaneWidth  = 60
 	minTwoPaneHeight = 8
+)
+
+// The items view's three panes (UI.md §3): the selected item's project, the
+// items as cards, and the selected item's detail. The two sides take 30% each
+// and the middle is whatever is left, so the list of cards gets the widest
+// column. They pay the same paneChrome and paneGap as chat's two, once more.
+//
+// minThreePaneWidth is 76 inner columns so that an 80-column terminal still
+// gets three panes: at that width the sides are 20 columns and each card's text
+// is 22, which is tight but reads. Below it the sides would drop into the
+// teens, and a project path or a digest in fifteen columns is a column of
+// ellipses. minThreePaneHeight leaves the card list room for two cards and a
+// heading.
+const (
+	itemsSideSplit     = 0.30
+	minThreePaneWidth  = 76
+	minThreePaneHeight = 10
+
+	// itemCardHeight is a card's rendered height: two border rows around a
+	// title line and a meta line. It is fixed so that scrolling the list is
+	// arithmetic on line numbers rather than a measurement of every card.
+	itemCardHeight = 4
+
+	// kvKeyWidth is the column the left pane's values start in.
+	kvKeyWidth = 8
 )
 
 // styleGutter indents the status line and the footer to that column.
@@ -278,6 +307,34 @@ func truncate(s string, width int) string {
 		return s
 	}
 	return runewidth.Truncate(s, width, "…")
+}
+
+// fitLines wraps a block to width and then truncates every resulting line to
+// it, returning the lines.
+//
+// Wrapping alone is not enough to keep a block inside a pane. wrapPlain breaks
+// on whitespace and never inside a word, so a path or a URL longer than the
+// pane survives as one line, lipgloss wraps it again at render time, the pane
+// grows a row, and MaxHeight takes that row out of the bottom border. The
+// truncate afterwards is what makes the width a guarantee rather than a
+// likelihood. Callers style the lines afterwards, because truncate counts raw
+// runes and would count an escape sequence as text.
+func fitLines(s string, width int) []string {
+	lines := strings.Split(wrapPlain(s, width), "\n")
+	for i, l := range lines {
+		lines[i] = truncate(l, width)
+	}
+	return lines
+}
+
+// fitStyled is fitLines with a style applied to each line afterwards, joined
+// back into a block.
+func fitStyled(s string, width int, style lipgloss.Style) string {
+	lines := fitLines(s, width)
+	for i, l := range lines {
+		lines[i] = style.Render(l)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // padBetween puts left and right on one line of the given width, with the

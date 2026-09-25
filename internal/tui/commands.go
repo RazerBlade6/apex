@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/RazerBlade6/apex/internal/advisor"
+	"github.com/RazerBlade6/apex/internal/project"
 	"github.com/RazerBlade6/apex/internal/store"
 )
 
@@ -41,7 +42,9 @@ func (m *Model) loadContextCmd() tea.Cmd {
 	}
 }
 
-// loadItemsCmd reads every action item and the projects they belong to.
+// loadItemsCmd reads every action item, the projects they belong to, and
+// those projects' digests, which the items view's left pane shows beside the
+// selected item.
 func (m *Model) loadItemsCmd() tea.Cmd {
 	st := m.opts.Store
 	return func() tea.Msg {
@@ -55,7 +58,49 @@ func (m *Model) loadItemsCmd() tea.Cmd {
 		if err != nil {
 			return itemsLoadedMsg{err: err}
 		}
-		return itemsLoadedMsg{items: items, projects: projects}
+		digests, err := st.ListDigests(ctx)
+		if err != nil {
+			return itemsLoadedMsg{err: err}
+		}
+		return itemsLoadedMsg{items: items, projects: projects, digests: digests}
+	}
+}
+
+// gitReadTimeout bounds one project's git read. It is longer than dbTimeout
+// because InspectGit is six subprocesses rather than a few indexed selects,
+// and a large repository on a slow disk takes a while to status; it exists for
+// the stalled network mount, not for the ordinary case.
+const gitReadTimeout = 30 * time.Second
+
+// ensureGitCmd reads the selected item's project's repository, if nothing has
+// yet.
+//
+// Git state is read lazily and per project rather than for the whole registry
+// at load: the left pane only ever shows one project, and a portfolio's worth
+// of `git status` on every reload would be the slowest thing the TUI does in
+// order to display a fraction of it. It returns nil when there is nothing to
+// do — no selection, a project the registry does not know, a read cached or
+// already in flight — so callers can batch it unconditionally.
+func (m *Model) ensureGitCmd() tea.Cmd {
+	it, ok := m.items.selected()
+	if !ok {
+		return nil
+	}
+	slug := it.ProjectSlug
+	p, known := m.items.projects[slug]
+	if !known || p.Path == "" {
+		return nil
+	}
+	if _, cached := m.items.git[slug]; cached || m.items.gitLoading[slug] {
+		return nil
+	}
+	m.items.gitLoading[slug] = true
+	path := p.Path
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), gitReadTimeout)
+		defer cancel()
+		state, err := project.InspectGit(ctx, path)
+		return gitStateMsg{slug: slug, state: state, err: err}
 	}
 }
 

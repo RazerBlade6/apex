@@ -217,7 +217,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// or a dispatch the user tabbed away from mid-flight.
 	case contextLoadedMsg, streamEventMsg, observedMsg:
 		return m.updateChat(msg)
-	case itemsLoadedMsg, dispatchLineMsg, dispatchDoneMsg:
+	case itemsLoadedMsg, dispatchLineMsg, dispatchDoneMsg, gitStateMsg:
 		return m.updateItems(msg)
 	case projectsLoadedMsg:
 		return m.updateProjects(msg)
@@ -322,13 +322,16 @@ func (m *Model) View() string {
 
 // bodyBlock is the finished content area, already frameWidth wide.
 //
-// For the items and projects views — and for chat in a terminal too small for
-// two panes — that is the one bounding box, with the view's body inside it. The
-// chat view's two-pane layout brings its own pair of boxes, sized so that they
-// plus the column between them come to the same width.
+// For the projects view — and for chat and items in a terminal too small for
+// their panes — that is the one bounding box, with the view's body inside it.
+// The chat view's two panes and the items view's three bring their own boxes,
+// sized so that they plus the columns between them come to the same width.
 func (m *Model) bodyBlock() string {
 	if m.view == viewChat && m.chatTwoPane() {
 		return m.chatPanes()
+	}
+	if m.view == viewItems && m.itemsThreePane() {
+		return m.itemsPanes()
 	}
 
 	var body string
@@ -403,7 +406,7 @@ func (m *Model) footer() string {
 	case viewChat:
 		keys = "tab views · enter send · esc stop · ctrl+c quit"
 	case viewItems:
-		keys = "tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit"
+		keys = "tab views · ↑↓ move · f filter · enter dispatch · pgup/pgdn scroll · r reload · ctrl+c quit"
 	default:
 		keys = "tab views · ↑↓ move · r reload · ctrl+c quit"
 	}

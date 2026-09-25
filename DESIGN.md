@@ -1243,8 +1243,9 @@ Bubble Tea, Elm architecture. Three views, switched by tab:
 - **Chat** (default) — the user's prompts and the input field in a narrow
   left-hand box, Apex's replies in a wide right-hand one, rendered through
   Glamour.
-- **Items** — action items grouped by project, filterable by status; `enter`
-  dispatches.
+- **Items** — the selected item's project on the left, the action items as
+  cards grouped by project in the middle, and the selected item's detail on the
+  right; filterable by status; `enter` dispatches.
 - **Projects** — the registry with digest previews and staleness indicators.
 
 **How all of that looks is specified in [UI.md](UI.md), not here.** The frame

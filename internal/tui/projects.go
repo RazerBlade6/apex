@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/RazerBlade6/apex/internal/store"
 )
@@ -102,14 +103,18 @@ func (m *Model) updateProjects(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) projectsView() string {
 	h := m.projects.height
+	// The state messages are fitted to the box before they are styled. Left to
+	// lipgloss, a sentence longer than the inner width wraps at render time,
+	// the box grows a row, and MaxHeight takes it out of the bottom border.
+	w := m.innerWidth()
 	switch {
 	case m.projects.loadErr != nil:
-		return padLines(styleError.Render("could not read the registry: "+m.projects.loadErr.Error()), h)
+		return padLines(fitStyled("could not read the registry: "+m.projects.loadErr.Error(), w, styleError), h)
 	case !m.projects.loaded:
-		return padLines(styleDim.Render("loading…"), h)
+		return padLines(fitStyled("loading…", w, styleDim), h)
 	case len(m.projects.projects) == 0:
-		return padLines(styleDim.Render(
-			"No projects registered. Add them to ~/.apex/context/PROJECTS.md, then run `apex sync`."), h)
+		return padLines(fitStyled(
+			"No projects registered. Add them to ~/.apex/context/PROJECTS.md, then run `apex sync`.", w, styleDim), h)
 	}
 
 	// The list gets the top half; the selected project's digest preview gets
@@ -174,14 +179,18 @@ func (m *Model) renderDigestPreview(height int) string {
 	}
 	p := m.projects.projects[m.projects.cursor]
 	d, ok := m.projects.digests[p.Slug]
+	w := m.innerWidth()
 	if !ok {
-		return styleDim.Render(p.Name + " has no digest yet. Run `apex sync` to generate one.")
+		return fitStyled(p.Name+" has no digest yet. Run `apex sync` to generate one.", w, styleDim)
 	}
 
-	head := styleLabel.Render(p.Name) + styleDim.Render(fmt.Sprintf("  %s · %s",
-		digestAge(m.now(), d.GeneratedAt), orDash(d.Model)))
-	body := wrapPlain(d.Body, m.innerWidth())
-	lines := strings.Split(body, "\n")
+	// Both halves of the heading are cut before they are styled, the name
+	// first, so a long name or model id cannot wrap the heading onto a second
+	// row the preview did not count.
+	name := truncate(p.Name, w)
+	head := styleLabel.Render(name) + styleDim.Render(truncate(fmt.Sprintf("  %s · %s",
+		digestAge(m.now(), d.GeneratedAt), orDash(d.Model)), w-lipgloss.Width(name)))
+	lines := fitLines(d.Body, w)
 	if len(lines) > height-1 {
 		lines = lines[:max(height-2, 1)]
 		lines = append(lines, styleDim.Render("…"))

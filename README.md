@@ -185,7 +185,8 @@ interface with three views on `tab`:
 
 - **Chat** — your prompts and the input field on the left, Apex's replies on the right,
   streamed and rendered as markdown
-- **Items** — action items grouped by project, filtered with `f`, dispatched with `enter`
+- **Items** — action items as cards grouped by project, with the selected item's project on
+  the left and its full detail on the right; filtered with `f`, dispatched with `enter`
 - **Projects** — the registry with digest previews and staleness indicators
 
 Chat splits the two speakers into their own columns, so a one-line question does not get
