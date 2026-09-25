@@ -234,9 +234,54 @@ pruned only on explicit confirmation, never silently.
 
 ### Identity context
 
-`PROFILE.md` and `SKILLS.md` are hand-written and read-only to Apex. They are
-loaded into the system prompt for every advisor call. Apex never writes to them
-in v1 — it may *suggest* additions in chat, but the user applies them.
+`PROFILE.md` and `SKILLS.md` are loaded into the system prompt for every advisor
+call. The user authors them; **Apex also appends to them as it learns.**
+
+### Learned observations
+
+When a conversation reveals something durable about the user — "I like pixel art",
+"I never want to touch Kubernetes again", "I'm learning Zig" — Apex records it
+rather than losing it when the session ends. The user should not have to teach Apex
+the same fact twice.
+
+The mechanics are the marker discipline already proven on `PROJECTS.md`, because
+the hazard is identical: a file the user hand-edits and Apex also writes.
+
+**Apex owns one section and nothing else** — a trailing `## Observed` block. Every
+entry carries a marker and a date; everything outside the block is the user's and is
+never touched. Writes are atomic (temp file, rename), so an interrupted write cannot
+truncate an identity file.
+
+```markdown
+## Observed
+<!--apex 2026-09-25--> Prefers pixel art for UI work; said while reviewing a mockup.
+<!--apex 2026-09-21--> Builds CLIs in Go or Rust by default.
+```
+
+**Extraction is gated, not per-turn.** An extraction call after every chat turn
+doubles the cost of conversation. Apex screens cheaply first — first person plus a
+preference or capability verb ("I like / prefer / always / never / I use / I'm
+learning") — and only then spends a call. A turn revealing nothing costs nothing.
+
+**Observations are superseded, not stacked.** "I'm learning Zig", followed months
+later by "I know Zig well now", must replace the earlier line rather than sit beside
+it. Contradiction handling belongs in extraction, not in a later cleanup pass.
+
+**The block is capped and consolidated.** This matters more than it appears:
+identity context is re-sent on *every* advisor call, and §8 established that prompt
+caching does not work on the subscription transport. An unbounded `## Observed`
+block is therefore a compounding quota cost on every call, forever. Cap it, and
+consolidate related observations into single lines when it fills.
+
+**The user stays in control.** `apex profile` lists observations with dates and
+sources; `apex profile --forget <n>` removes one. An observation the user promotes
+into their own prose above the block should then be dropped from it.
+
+> **The risk worth naming:** a one-off remark becoming a standing preference. "I
+> like pixel art" said about one specific mockup is not a general aesthetic, and an
+> over-general extraction quietly skews every future suggestion with no visible
+> cause. Recording the *source* alongside the claim is what makes a wrong inference
+> debuggable rather than mysterious.
 
 ### Digests
 
@@ -348,6 +393,11 @@ CREATE TABLE messages (
     output_tokens INTEGER
 );
 
+-- Extended by migration 003: session_id (§9 requires a resumable dispatch) and
+-- project_slug (§14's `apex start` dispatch has no action item, so nothing else
+-- records what it worked on). Both were derivable by reading this schema against
+-- §9 and §14 before M5 began — a cross-section consistency pass over the schema is
+-- cheap at design time and a migration afterwards.
 CREATE TABLE exec_runs (
     id             TEXT PRIMARY KEY,
     action_item_id TEXT REFERENCES action_items(id) ON DELETE SET NULL,
@@ -776,8 +826,10 @@ soft-warning value cannot turn a working call into a false session limit, and fa
 back to matching the CLI's error text otherwise. Those text patterns are an
 educated guess. The failure mode is "reported as unknown with the CLI's own message
 quoted" rather than "silently wrong" — acceptable, but not the same as verified.
-**If this limit is ever hit in practice, capture the `result` event's exact text**;
-it is the single most valuable missing fixture in the codebase.
+**If this limit is ever hit in practice, capture the `result` event's exact text.**
+It is the single most valuable missing fixture in the codebase — and as of M5 the
+same unverified phrase list exists in two packages, `provider/claudecli` and
+`executor/claudecode`, so one capture fixes both.
 
 `KindSessionLimit` is deliberately **not** retryable. The request would succeed
 eventually, but hours later, and a digest loop treating it as retryable would spin.
@@ -864,6 +916,14 @@ Run with `cmd.Dir` set to the project path. Three details matter:
 so the executor can distinguish tool calls from file edits from the final result and
 map them onto typed `Event` values. Text scraping would throw that away.
 
+**But what changed on disk comes from `git status`, not from the event stream.**
+Counting file edits by tool name is a second, weaker answer to a question the
+working tree answers exactly — and it is wrong whenever the agent writes via a shell
+heredoc rather than the `Write` tool, which a real M5 run did, reporting "no file
+changes" over a tree with two new files. Where the agent's own count disagrees with
+the working tree, report both and say which one counts. The general rule: **when a
+fact is observable locally, never accept the subprocess's account of it.**
+
 **Apex generates the session UUID** and stores it on the `exec_runs` row. A stalled
 or failed dispatch is then resumable with `claude --resume <uuid>`, and the run is
 traceable after the fact.
@@ -872,7 +932,26 @@ traceable after the fact.
 watching the TTY, so anything that would prompt must deny rather than hang.
 `--permission-mode acceptEdits` allows file edits without confirmation while still
 gating riskier operations; `bypassPermissions` is deliberately not the default and
-should stay a per-run opt-in.
+stays a per-run opt-in (`apex do --bypass-permissions`).
+
+> **The permission mode and the acceptance criteria were specified independently,
+> and they contradict each other.** Every brief asks that the change build and the
+> tests still pass — but under `acceptEdits` + `--permission-prompts none`, `Bash`
+> is *denied*, so the run cannot compile or test anything. The first real dispatch
+> burned a turn discovering this and then honestly reported work it could not
+> verify. Neither decision is wrong alone; together they guaranteed that every
+> unattended run reports unverified work.
+>
+> Mitigated by stating the run's actual capabilities in the brief, so it stops
+> promising what it cannot do. **The better answer, still open: a narrow
+> `--allowed-tools` allowlist** carrying just the build and test commands for the
+> project's stack, so an unattended run can meet its own acceptance criteria
+> without being handed everything.
+>
+> The general lesson is worth carrying into later sections: **wherever a spec
+> states both a capability limit and a success criterion, check that the limit
+> permits the criterion.** They are usually written in different paragraphs, by
+> different reasoning, and never compared.
 
 Everything is teed to `~/.apex/logs/exec/<run-id>.log`.
 
@@ -880,6 +959,25 @@ Because the agent runs inside the project directory, it picks up `PROJECT.md` an
 any `CLAUDE.md` from the working tree without Apex passing them explicitly. The
 brief therefore carries *intent* — what to do and why it matters — rather than
 project background.
+
+**The digest is loaded but deliberately kept out of the brief.** §14's flow says to
+load it, which reads as an instruction to include it; it exists only to warn that
+the portfolio has moved since the item was generated. Putting it in the brief would
+be exactly the project background this section forbids.
+
+> **Open decision: the dispatched agent also inherits the user's _global_
+> `CLAUDE.md`.** Project-level inheritance is the point, and it is why the brief can
+> stay short. User-global inheritance is a side effect nobody chose — both real M5
+> dispatches volunteered that they were departing from a convention in
+> `~/.claude/CLAUDE.md`. That means a user's personal Claude Code conventions
+> silently shape every Apex dispatch, including conventions that make no sense
+> here: "delegate code generation to a sub-agent" is redundant advice for a process
+> that *is* the delegation layer.
+>
+> `--restricted` is not the answer — it strips the code-running tools the executor
+> exists to use. `--setting-sources project,local` is a candidate but governs
+> settings files, not `CLAUDE.md` discovery; verify before relying on it. This
+> needs a deliberate choice rather than a default inherited by accident.
 
 > **The builder loop runs on the Claude Code subscription, not on an API key.**
 > Apex is bring-your-own-key for the advisor loop only. Worth remembering for the
@@ -1215,7 +1313,9 @@ Not in v1, but the design should not foreclose them:
 - **Multi-user** — all state under one root; schema takes a `user_id` migration.
 - **Non-terminal frontend** — enforced by `tui/` importing downward only.
 - **Retrieval** — unnecessary while digests fit comfortably in context.
-- **Apex writing to `PROFILE.md` / `SKILLS.md`** — it may suggest; the user applies.
+- ~~Apex writing to `PROFILE.md` / `SKILLS.md`~~ — **reversed.** Apex appends
+  learned observations to a marked `## Observed` block in each file; see §6.
+  Implement with M6's chat, which is where extraction has a conversation to draw on.
 
 ---
 
@@ -1264,26 +1364,54 @@ Settled 2026-09-21, previously open:
     when there is a key to spend. §8's second finding reinforces it: prompt-cache
     savings do not exist on the subscription transport at all.
 
+11. **`Provider.Structured` reports `Usage`** — closed in M5. The signature is
+    now `Structured(...) (Usage, error)` across all three adapters, and usage is
+    returned even on a failed call, so a request that was billed and then failed
+    to decode still accounts for itself. `review` and `ideas` print what they
+    cost, and `action_items.generated_by` records the **serving** model rather
+    than the route's alias — a live run now writes `claude-sonnet-5` in both
+    `digests.model` and `generated_by`, where M4 wrote `claude-sonnet-5` and
+    `sonnet` for the same run.
+
+12. **One `claude` lookup** — closed in M5. `internal/claudecmd` now owns finding
+    the binary, killing a process group, and decoding the `stream-json` wire
+    format; the provider and the executor both use it, and `doctor` reports the
+    executor's availability by calling `Executor.Available()` rather than by
+    re-implementing the question. The command lines stay separate and must: the
+    provider's `--tools "" --restricted` would make a dispatch unable to edit
+    anything, and a test asserts neither argv grows the other's flags.
+
+13. **`doctor` checks the identity files** — closed in M5. `PROFILE.md` and
+    `SKILLS.md` are reported present, absent, or present-but-empty, as a warning
+    with the cost named: an empty identity context still produces output, it is
+    just generic advice about code rather than advice for this user, and that
+    failure is invisible from the outside.
+
 ### Still open
 
 - **Turso offline-writes maturity in `tursogo`** — would remove the network
   dependency on writes and let `TursoBackend` become the sensible default. Verify
   against the driver before relying on it.
-- **`Provider.Structured` reports no `Usage`.** `Stream` returns usage on
-  `EventDone`; `Structured` returns only an error. So the two calls that carry the
-  *largest* prompt Apex ever sends — `review` and `ideas`, which hold the identity
-  context plus every digest — are the only ones whose token cost is invisible,
-  including the cache-write number §8 just proved was worth having. It also forces
-  an inconsistency in provenance: `digests.model` records the **serving** model
-  from `Usage.Model`, while `action_items.generated_by` can only record the
-  **route's** model, so one column says `claude-sonnet-5` and the other says
-  `sonnet` for the same run. Fixing it means changing the interface — most likely
-  `Structured(...) (Usage, error)` — which is a deliberate M5 change, not something
-  to slip into a milestone that did not need it.
-- **`doctor` resolves the `claude` binary twice, two different ways.** The M1
-  executor check has its own lookup; `claudecli.LookPath` is a second. They agree
-  today. M5 should collapse the executor onto the provider's lookup so they cannot
-  drift.
+- **`--permission-mode acceptEdits` cannot verify its own work.** Every brief
+  asks for "the change builds, and the project's existing tests still pass", and
+  under the default mode a dispatched agent may write files and may not run
+  commands — `--permission-prompts none` denies rather than asks. M5's first real
+  dispatch hit exactly this: the agent's build-and-test command was denied, and it
+  correctly reported a change it had not been able to verify. Two half-fixes
+  shipped: the brief now states up front what the run may do, and
+  `--bypass-permissions` is the per-run opt-in §9 always intended. The real
+  question is left open — whether the right default is a narrow allowlist
+  (`--allowed-tools`) covering build and test for the project's stack, which would
+  let an unattended run meet its own acceptance criteria without granting
+  everything.
+
+- **What changed is read from git, not from the agent.** M5's second real
+  dispatch wrote both its files with shell heredocs rather than the edit tools,
+  so the tool-derived file list was empty while the working tree held two new
+  files. `apex do` now reports `git status --short` and says so when the agent's
+  own count disagrees. The `Result.FilesChanged` field remains a claim, and is
+  useful only as the thing to compare against.
+
 - **`--probe` is cheap, not free, for `claude-cli`.** The API adapters bound the
   probe with `max_tokens: 16`; the CLI has no equivalent flag, so a subscription
   probe generates a full short reply against the user's window.

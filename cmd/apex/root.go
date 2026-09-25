@@ -7,7 +7,7 @@ import (
 // version is the build version, overridable at link time:
 //
 //	go build -ldflags "-X main.version=1.2.3" ./cmd/apex
-var version = "0.1.0-dev (M4)"
+var version = "0.1.0-dev (M5)"
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
@@ -16,16 +16,18 @@ func newRootCmd() *cobra.Command {
 		Long: `Apex holds context about you and your projects, generates action items
 and project ideas, and dispatches implementation work to a coding agent.
 
-This build implements milestones M1 through M4: the CLI skeleton,
+This build implements milestones M1 through M5: the CLI skeleton,
 configuration, credentials, storage, environment verification, the context
 layer, the provider adapters — including claude-cli, which runs inference
-through a Claude subscription rather than an API key — and the advisor loop
-itself: digest generation, action items, and project ideas. do, start, and
-the TUI arrive later.
+through a Claude subscription rather than an API key — the advisor loop, and
+the executor that closes it. The TUI arrives with M6.
 
-Three commands reach a model: sync generates digests, review generates action
-items, and ideas proposes projects. doctor does so only with --probe. items
-and show read the database and cost nothing.`,
+Five commands reach a model. sync, review and ideas run the advisor loop,
+which emits text. do and start run the builder loop, which writes code: they
+dispatch a brief to a coding agent working inside the project directory, under
+an exclusive per-project lock, and spend Claude Code subscription quota rather
+than an API key. doctor reaches a model only with --probe; items and show read
+the database and cost nothing.`,
 		Version:       version,
 		SilenceUsage:  true, // a runtime failure is not a usage error
 		SilenceErrors: true, // main formats errors itself
@@ -40,6 +42,7 @@ and show read the database and cost nothing.`,
 	root.AddCommand(
 		newDoctorCmd(), newConfigCmd(), newSyncCmd(),
 		newReviewCmd(), newIdeasCmd(), newItemsCmd(), newShowCmd(),
+		newDoCmd(), newStartCmd(),
 	)
 	return root
 }

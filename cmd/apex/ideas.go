@@ -76,6 +76,7 @@ func runIdeas(ctx context.Context, w io.Writer) error {
 	}
 
 	if len(result.Inserted) > 0 {
+		fmt.Fprintf(w, "%s · %s\n", dash(result.Model), describeUsage(result.Usage))
 		fmt.Fprintf(w, "Recorded %d idea(s) as proposed.\n", len(result.Inserted))
 		fmt.Fprintln(w, "apex show <id>   for one in full")
 	}

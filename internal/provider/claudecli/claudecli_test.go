@@ -298,7 +298,7 @@ func TestStructuredUsesTheJSONSchemaFlag(t *testing.T) {
 			Title string `json:"title"`
 		} `json:"items"`
 	}
-	if err := p.Structured(context.Background(), ask("propose"), schema, &out); err != nil {
+	if _, err := p.Structured(context.Background(), ask("propose"), schema, &out); err != nil {
 		t.Fatalf("Structured: %v", err)
 	}
 	if len(out.Items) != 1 || out.Items[0].Title != "do the thing" {
@@ -320,7 +320,7 @@ func TestStructuredRejectsOutputThatIsNotTheSchema(t *testing.T) {
 	p := newProvider(t, f.bin)
 
 	var out map[string]any
-	err := p.Structured(context.Background(), ask("propose"), json.RawMessage(`{"type":"object"}`), &out)
+	_, err := p.Structured(context.Background(), ask("propose"), json.RawMessage(`{"type":"object"}`), &out)
 	if err == nil {
 		t.Fatal("Structured accepted output that was not JSON")
 	}

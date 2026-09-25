@@ -131,8 +131,24 @@ type Provider interface {
 	// the sending goroutine stays parked on its last send.
 	Stream(ctx context.Context, req Request) (<-chan Event, error)
 
-	// Structured constrains output to a JSON schema and unmarshals into out.
-	Structured(ctx context.Context, req Request, schema json.RawMessage, out any) error
+	// Structured constrains output to a JSON schema, unmarshals into out,
+	// and reports what the call cost.
+	//
+	// The Usage return is M5's, and DESIGN.md §18 argued for it at length
+	// before it existed. Stream reported usage on EventDone and Structured
+	// reported none, which meant the two calls carrying the *largest* prompt
+	// Apex ever sends — review and ideas, which hold the identity context
+	// plus every digest — were the only ones whose token cost was invisible,
+	// including the cache-write number §8 proved was worth having. It also
+	// forced an inconsistency in provenance: digests.model recorded the
+	// serving model from Usage.Model while action_items.generated_by could
+	// only record the route's, so one column said "claude-sonnet-5" and the
+	// other said "sonnet" for the same run.
+	//
+	// Usage is returned even on failure, so a call that was billed and then
+	// failed to decode still reports what it spent. A provider that cannot
+	// say returns the zero value; nothing here invents one.
+	Structured(ctx context.Context, req Request, schema json.RawMessage, out any) (Usage, error)
 }
 
 // Config is what the registry hands an adapter: the credential, the endpoint,

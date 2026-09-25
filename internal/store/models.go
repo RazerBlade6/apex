@@ -103,11 +103,19 @@ const (
 
 // ExecRun records one dispatch to an executor.
 type ExecRun struct {
-	ID           string
+	ID string
+	// ActionItemID is empty for a dispatch with no item behind it, which is
+	// what `apex start` does when it scaffolds a project from an idea.
 	ActionItemID string
-	Executor     string
-	StartedAt    time.Time
-	FinishedAt   *time.Time
-	ExitStatus   string
-	LogPath      string
+	// ProjectSlug is what was worked on. It is the only thing that says so
+	// for a run with no action item.
+	ProjectSlug string
+	Executor    string
+	// SessionID is the agent session Apex generated for this run, so a
+	// stalled dispatch is resumable with `claude --resume` (DESIGN.md §9).
+	SessionID  string
+	StartedAt  time.Time
+	FinishedAt *time.Time
+	ExitStatus string
+	LogPath    string
 }

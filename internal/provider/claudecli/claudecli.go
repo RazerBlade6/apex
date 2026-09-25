@@ -28,8 +28,9 @@
 //   - Request.MaxTokens has no flag. The CLI decides the output limit from
 //     the model. It is accepted and ignored rather than approximated.
 //   - Request.CacheSystem has no flag either. The CLI manages its own cache
-//     breakpoints, and the capture in events.go shows it doing so: a trivial
-//     prompt reported 16,440 cache-creation tokens without being asked.
+//     breakpoints, and the capture documented in internal/claudecmd shows it
+//     doing so: a trivial prompt reported 16,440 cache-creation tokens
+//     without being asked.
 //   - Multi-turn history is flattened into one prompt; see renderPrompt.
 package claudecli
 
@@ -47,11 +48,6 @@ import (
 
 // Name is the value that appears as `provider = "claude-cli"` in config.toml.
 const Name = "claude-cli"
-
-// maxLineBytes bounds one line of stdout. The assembled `assistant` message
-// arrives as a single line and grows with the response, so the default
-// 64KiB scanner limit is not enough; this is generous and still bounded.
-const maxLineBytes = 8 << 20
 
 // maxPromptBytes bounds what is handed to the CLI on the command line.
 //
@@ -244,23 +240,26 @@ func (p *Provider) run(ctx context.Context, args []string, ch chan<- provider.Ev
 // additionalProperties false. Nothing is checked here: a schema the CLI
 // rejects comes back as a classified request failure, which is the same
 // answer the key-based adapters give.
-func (p *Provider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) error {
+func (p *Provider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) (provider.Usage, error) {
 	if out == nil {
-		return fmt.Errorf("claudecli: Structured needs a destination to unmarshal into")
+		return provider.Usage{}, fmt.Errorf("claudecli: Structured needs a destination to unmarshal into")
 	}
 	var probe map[string]any
 	if err := json.Unmarshal(schema, &probe); err != nil {
-		return fmt.Errorf("claudecli: output schema is not a JSON object: %w", err)
+		return provider.Usage{}, fmt.Errorf("claudecli: output schema is not a JSON object: %w", err)
 	}
 
 	args, _, err := p.argv(req, schema)
 	if err != nil {
-		return err
+		return provider.Usage{}, err
 	}
 	result, perr := p.invoke(ctx, "structured", args, nil)
 	if perr != nil {
-		return perr
+		// invoke hands back what the run reported before it failed, so a
+		// call that was billed and then errored still accounts for itself.
+		return result.usage, perr
 	}
+	usage := result.usage
 
 	// The result event carries the final answer; the accumulated deltas are
 	// the same text and stand in only if the run ended without one.
@@ -269,23 +268,23 @@ func (p *Provider) Structured(ctx context.Context, req provider.Request, schema 
 		body = strings.TrimSpace(result.text)
 	}
 	if body == "" {
-		return &provider.Error{
+		return usage, &provider.Error{
 			Provider: Name, Op: "structured", Kind: provider.KindUnknown,
 			Message: "the run produced no output to decode",
 		}
 	}
 	if err := json.Unmarshal([]byte(body), out); err == nil {
-		return nil
+		return usage, nil
 	}
 	// One tolerance, deliberately narrow: a model that wraps its JSON in a
 	// markdown fence despite the schema. Anything else is a real failure and
 	// is reported as one.
 	if unfenced, ok := unfence(body); ok {
 		if err := json.Unmarshal([]byte(unfenced), out); err == nil {
-			return nil
+			return usage, nil
 		}
 	}
-	return &provider.Error{
+	return usage, &provider.Error{
 		Provider: Name, Op: "structured", Kind: provider.KindUnknown,
 		Message: provider.Truncate("the response was not the JSON the schema asked for: " + body),
 	}
@@ -393,7 +392,7 @@ func (p *Provider) invoke(ctx context.Context, op string, args []string, emit fu
 						out.model = ln.Event.Message.Model
 					}
 					if u := ln.Event.Message.Usage; u != nil {
-						out.usage = u.usage()
+						out.usage = usageOf(u)
 					}
 				}
 			case "content_block_delta":
@@ -408,7 +407,7 @@ func (p *Provider) invoke(ctx context.Context, op string, args []string, emit fu
 				}
 			case "message_delta":
 				if u := ln.Event.Usage; u != nil {
-					out.usage = u.usage()
+					out.usage = usageOf(u)
 				}
 			}
 		case "assistant":
@@ -419,7 +418,7 @@ func (p *Provider) invoke(ctx context.Context, op string, args []string, emit fu
 				out.model = ln.Message.Model
 			}
 			if u := ln.Message.Usage; u != nil {
-				out.usage = u.usage()
+				out.usage = usageOf(u)
 			}
 			if !out.sawDelta {
 				for _, block := range ln.Message.Content {
@@ -436,12 +435,12 @@ func (p *Provider) invoke(ctx context.Context, op string, args []string, emit fu
 			copied := ln
 			resultLn = &copied
 			if u := ln.Usage; u != nil {
-				out.usage = u.usage()
+				out.usage = usageOf(u)
 			}
 			if out.model == "" {
-				out.model = copied.servingModel()
+				out.model = copied.ServingModel()
 			}
-			out.result = ln.text()
+			out.result = ln.Text()
 		}
 
 		if abandoned {
@@ -466,8 +465,11 @@ func (p *Provider) invoke(ctx context.Context, op string, args []string, emit fu
 	// asked for — "opus" resolves to a dated id, and DESIGN.md §7 records the
 	// model on every digest and action item.
 	out.usage.Model = out.model
+	// The outcome is returned even on failure: it carries whatever usage the
+	// run reported before it went wrong, and a call that was billed should
+	// say so (DESIGN.md §18).
 	if perr := classify(ctx, op, out, resultLn, limit, waitErr, scanErr, &stderr); perr != nil {
-		return nil, perr
+		return out, perr
 	}
 	return out, nil
 }

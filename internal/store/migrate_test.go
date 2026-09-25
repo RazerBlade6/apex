@@ -455,8 +455,12 @@ func TestUniqueProjectPathFailsLoudlyOnDuplicates(t *testing.T) {
 			t.Error("schema_migrations recorded a migration that failed")
 		}
 	}
-	if len(status.Pending) != 1 || status.Pending[0].Version != 2 {
-		t.Errorf("Pending = %+v, want migration 2 still outstanding", status.Pending)
+	// Migration 2 is still outstanding, and still first: a forward-only run
+	// stops at the one that failed rather than skipping past it. Anything
+	// numbered above it stays pending too, which is why this asserts the
+	// head of the queue rather than its length.
+	if len(status.Pending) == 0 || status.Pending[0].Version != 2 {
+		t.Errorf("Pending = %+v, want migration 2 still outstanding and first", status.Pending)
 	}
 
 	// And the migration lock was released, so a rerun is not wedged.

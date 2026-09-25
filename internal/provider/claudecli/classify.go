@@ -114,9 +114,9 @@ func classify(
 	// 2. A subscription window that is spent. Read only on a failed run:
 	//    the rate_limit_event's non-exhausted values are not fully known, so
 	//    a successful stream is never reported as limited.
-	if !limit.permissive() || containsAny(lower, sessionLimitPhrases) {
+	if !limit.Permissive() || containsAny(lower, sessionLimitPhrases) {
 		msg := "the Claude subscription's usage window is exhausted"
-		if w := limit.window(); w != "" {
+		if w := limit.Window(); w != "" {
 			msg = fmt.Sprintf("the Claude subscription's %s usage window is exhausted", w)
 		}
 		if detail != "" {
@@ -125,7 +125,7 @@ func classify(
 		return &provider.Error{
 			Provider: Name, Op: op, Kind: provider.KindSessionLimit,
 			Message:  provider.Truncate(msg),
-			ResetsAt: limit.resets(),
+			ResetsAt: limit.Resets(),
 			Err:      waitErr,
 		}
 	}

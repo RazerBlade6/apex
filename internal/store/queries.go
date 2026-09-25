@@ -24,7 +24,7 @@ const (
 	ideaColumns       = `id, title, pitch, rationale, status, started_project_slug, created_at, generated_by`
 	sessionColumns    = `id, title, started_at`
 	messageColumns    = `id, session_id, role, content, created_at, model, input_tokens, output_tokens`
-	execRunColumns    = `id, action_item_id, executor, started_at, finished_at, exit_status, log_path`
+	execRunColumns    = `id, action_item_id, project_slug, executor, session_id, started_at, finished_at, exit_status, log_path`
 )
 
 // --- projects ---------------------------------------------------------------
@@ -157,6 +157,7 @@ func (s *Store) RenameProjectSlug(ctx context.Context, oldSlug, newSlug string) 
 		{"digest", `UPDATE digests SET project_slug = ? WHERE project_slug = ?`},
 		{"action items", `UPDATE action_items SET project_slug = ? WHERE project_slug = ?`},
 		{"ideas", `UPDATE ideas SET started_project_slug = ? WHERE started_project_slug = ?`},
+		{"exec runs", `UPDATE exec_runs SET project_slug = ? WHERE project_slug = ?`},
 	} {
 		if _, err := tx.ExecContext(ctx, child.stmt, newSlug, oldSlug); err != nil {
 			return fmt.Errorf("rename project %s to %s: %s: %w", oldSlug, newSlug, child.what, err)
@@ -658,8 +659,9 @@ func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]Message, 
 func (s *Store) InsertExecRun(ctx context.Context, r ExecRun) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO exec_runs (`+execRunColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, optText(r.ActionItemID), r.Executor, formatTime(r.StartedAt),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, optText(r.ActionItemID), optText(r.ProjectSlug), r.Executor,
+		optText(r.SessionID), formatTime(r.StartedAt),
 		timeArg(r.FinishedAt), optText(r.ExitStatus), optText(r.LogPath))
 	if err != nil {
 		return fmt.Errorf("insert exec run %s: %w", r.ID, err)
@@ -725,17 +727,20 @@ func (s *Store) ListExecRuns(ctx context.Context, actionItemID string) ([]ExecRu
 
 func scanExecRun(sc scanner) (ExecRun, error) {
 	var (
-		r                   ExecRun
-		actionItemID        sql.NullString
-		startedAt           string
-		finishedAt          sql.NullString
-		exitStatus, logPath sql.NullString
+		r                      ExecRun
+		actionItemID, projSlug sql.NullString
+		sessionID              sql.NullString
+		startedAt              string
+		finishedAt             sql.NullString
+		exitStatus, logPath    sql.NullString
 	)
-	if err := sc.Scan(&r.ID, &actionItemID, &r.Executor, &startedAt,
-		&finishedAt, &exitStatus, &logPath); err != nil {
+	if err := sc.Scan(&r.ID, &actionItemID, &projSlug, &r.Executor, &sessionID,
+		&startedAt, &finishedAt, &exitStatus, &logPath); err != nil {
 		return ExecRun{}, err
 	}
 	r.ActionItemID = text(actionItemID)
+	r.ProjectSlug = text(projSlug)
+	r.SessionID = text(sessionID)
 	r.ExitStatus = text(exitStatus)
 	r.LogPath = text(logPath)
 

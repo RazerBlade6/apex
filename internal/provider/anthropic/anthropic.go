@@ -203,17 +203,17 @@ func (p *Provider) run(ctx context.Context, params sdk.MessageNewParams, ch chan
 //
 // It streams for the same reason Stream does: a structured call that fills a
 // large max_tokens would otherwise race the HTTP timeout.
-func (p *Provider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) error {
+func (p *Provider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) (provider.Usage, error) {
 	if out == nil {
-		return fmt.Errorf("anthropic: Structured needs a destination to unmarshal into")
+		return provider.Usage{}, fmt.Errorf("anthropic: Structured needs a destination to unmarshal into")
 	}
 	params, err := p.params(req)
 	if err != nil {
-		return err
+		return provider.Usage{}, err
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(schema, &decoded); err != nil {
-		return fmt.Errorf("anthropic: output schema is not a JSON object: %w", err)
+		return provider.Usage{}, fmt.Errorf("anthropic: output schema is not a JSON object: %w", err)
 	}
 	// output_config.format, not the deprecated top-level output_format.
 	params.OutputConfig.Format = sdk.JSONOutputFormatParam{Schema: decoded}
@@ -221,30 +221,34 @@ func (p *Provider) Structured(ctx context.Context, req provider.Request, schema 
 	stream := p.client.Messages.NewStreaming(ctx, params)
 	defer stream.Close() //nolint:errcheck // nothing useful to do with a close failure here
 
+	// msg accumulates the whole response, so its usage block is available
+	// even on a path that then fails to decode: a call that was billed
+	// reports what it spent (DESIGN.md §18).
 	var msg sdk.Message
 	for stream.Next() {
 		if err := msg.Accumulate(stream.Current()); err != nil {
-			return &provider.Error{
+			return usageOf(msg), &provider.Error{
 				Provider: Name, Op: "structured", Kind: provider.KindUnknown,
 				Message: provider.Truncate(err.Error()), Err: err,
 			}
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return classify("structured", err)
+		return usageOf(msg), classify("structured", err)
 	}
+	usage := usageOf(msg)
 
 	body := firstText(msg)
 	if strings.TrimSpace(body) == "" {
-		return &provider.Error{
+		return usage, &provider.Error{
 			Provider: Name, Op: "structured", Kind: provider.KindUnknown,
 			Message: "the response carried no text block",
 		}
 	}
 	if err := json.Unmarshal([]byte(body), out); err != nil {
-		return fmt.Errorf("anthropic: decode structured response: %w", err)
+		return usage, fmt.Errorf("anthropic: decode structured response: %w", err)
 	}
-	return nil
+	return usage, nil
 }
 
 // firstText returns the first text block of a message, skipping any thinking

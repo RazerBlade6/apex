@@ -88,6 +88,11 @@ func runReview(ctx context.Context, w io.Writer, only string) error {
 		writeActionItem(w, item, actx.ProjectName(item.ProjectSlug), width)
 	}
 
+	// The call's cost, which M5's Structured signature made reportable for
+	// the first time (DESIGN.md §18). This is the largest prompt Apex sends,
+	// so it is the one whose cache behaviour is most worth watching.
+	fmt.Fprintf(w, "%s · %s\n", dash(result.Model), describeUsage(result.Usage))
+
 	if len(result.Inserted) > 0 {
 		fmt.Fprintf(w, "Recorded %d action item(s) as proposed (context %s).\n",
 			len(result.Inserted), short(result.ContextHash))

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -215,8 +216,16 @@ func TestReadOnlyCommandsDoNotMigrate(t *testing.T) {
 	if migrations.Level != levelWarn {
 		t.Errorf("migrations check is %v, want a warning: %+v", migrations.Level, migrations)
 	}
-	if !strings.Contains(migrations.Detail, "2 pending") {
-		t.Errorf("doctor did not report both pending migrations: %q", migrations.Detail)
+	// Every embedded migration is outstanding against a bootstrap-only
+	// database. The count is asserted from the embedded set rather than
+	// hardcoded, so adding a migration does not fail this test for the wrong
+	// reason.
+	embedded, err := store.Migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("%d pending", len(embedded)); !strings.Contains(migrations.Detail, want) {
+		t.Errorf("doctor did not report every pending migration (%s): %q", want, migrations.Detail)
 	}
 	if !strings.Contains(migrations.Fix, "apex sync") {
 		t.Errorf("the fix does not name the command that owns migrations: %q", migrations.Fix)

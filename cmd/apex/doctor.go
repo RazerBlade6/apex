@@ -17,6 +17,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/RazerBlade6/apex/internal/config"
+	"github.com/RazerBlade6/apex/internal/contextfs"
+	"github.com/RazerBlade6/apex/internal/executor"
+	"github.com/RazerBlade6/apex/internal/executor/claudecode"
 	"github.com/RazerBlade6/apex/internal/provider"
 	"github.com/RazerBlade6/apex/internal/provider/claudecli"
 	"github.com/RazerBlade6/apex/internal/provider/registry"
@@ -190,19 +193,10 @@ func runDoctor(ctx context.Context, opts doctorOptions) *report {
 		required: true,
 		fix:      "install the Xcode command line tools: xcode-select --install",
 	})
-	checkBinary(ctx, r, binarySpec{
-		name:     "claude (executor)",
-		bin:      "claude",
-		args:     []string{"--version"},
-		required: true,
-		extraDirs: []string{
-			filepath.Join(os.Getenv("HOME"), ".local", "bin"),
-		},
-		fix: "install the Claude Code CLI and ensure it is on PATH\n" +
-			"apex dispatches implementation work to it (DESIGN.md §9)",
-	})
+	checkExecutor(ctx, r, opts)
 
 	checkLayout(ctx, r)
+	checkIdentity(ctx, r)
 	cfg := checkConfig(ctx, r)
 	if cfg != nil {
 		checkKeys(ctx, r, cfg)
@@ -214,6 +208,116 @@ func runDoctor(ctx context.Context, opts doctorOptions) *report {
 		}
 	}
 	return r
+}
+
+// checkExecutor asks the executor itself whether it can run, then confirms
+// the binary it resolved actually executes.
+//
+// DESIGN.md §18 recorded the reason this is not a hand-rolled lookup any
+// more: "doctor resolves the claude binary twice, two different ways. The M1
+// executor check has its own lookup; claudecli.LookPath is a second. They
+// agree today. M5 should collapse the executor onto the provider's lookup so
+// they cannot drift." Both now go through internal/claudecmd, and this check
+// reaches it through Executor.Available() — so what doctor reports is
+// literally the same question a dispatch asks, rather than a second
+// implementation of it that happens to agree.
+func checkExecutor(ctx context.Context, r *report, opts doctorOptions) {
+	name := "executor (" + claudecode.Name + ")"
+	exec := claudecode.New(claudecode.Options{Binary: opts.claudeBin})
+
+	if err := exec.Available(); err != nil {
+		var unavailable *executor.UnavailableError
+		fix := "install the Claude Code CLI and ensure it is on PATH"
+		if errors.As(err, &unavailable) && unavailable.Fix != "" {
+			fix = unavailable.Fix
+		}
+		r.fail(name, err.Error(), fix)
+		return
+	}
+
+	// Available() resolves the binary and deliberately stops there, because a
+	// dispatch should not pay for a process start to ask a question it is
+	// about to answer anyway. doctor is where the slower, more thorough
+	// answer belongs: a quarantined or non-executable binary resolves fine
+	// and still cannot run.
+	bin, err := exec.Binary()
+	if err != nil {
+		r.fail(name, err.Error(), "install the Claude Code CLI and ensure it is on PATH")
+		return
+	}
+	version, err := runVersion(ctx, bin, "--version")
+	if err != nil {
+		r.fail(name, fmt.Sprintf("%s is present but did not run: %v", bin, err),
+			"check the binary is executable and not quarantined")
+		return
+	}
+	r.ok(name, fmt.Sprintf("%s (%s)", version, bin))
+}
+
+// checkIdentity reports whether the identity documents exist (DESIGN.md §6).
+//
+// This closes the third M5 item in §18. PROFILE.md and SKILLS.md are loaded
+// into the system prompt of every advisor call, and when they are absent the
+// loop still runs — it just reasons from project digests alone and produces
+// generic advice about code rather than advice for this user. That failure is
+// completely silent from the outside: the output looks like output. doctor
+// exists to catch exactly the assumptions that fail quietly, so it says so.
+//
+// A missing file is a warning, not a failure. Apex works without them, and
+// the advisor commands already say the same thing at the point of use; what
+// doctor adds is that you find out before you have judged the output.
+func checkIdentity(ctx context.Context, r *report) {
+	const name = "identity context"
+
+	root, err := config.Root()
+	if err != nil {
+		r.fail(name, err.Error(), "set APEX_HOME to a writable directory")
+		return
+	}
+	identity, err := contextfs.LoadIdentity(ctx, root)
+	if err != nil {
+		r.fail(name, err.Error(), fmt.Sprintf("ensure %s is readable", contextfs.ContextDir(root)))
+		return
+	}
+
+	var present, missing, empty []string
+	for _, doc := range []struct {
+		file string
+		doc  contextfs.Document
+	}{
+		{contextfs.ProfileFile, identity.Profile},
+		{contextfs.SkillsFile, identity.Skills},
+	} {
+		switch {
+		case !doc.doc.Present:
+			missing = append(missing, doc.file)
+		case doc.doc.Empty():
+			empty = append(empty, doc.file)
+		default:
+			present = append(present, fmt.Sprintf("%s (%d bytes)", doc.file, len(doc.doc.Body)))
+		}
+	}
+
+	if len(missing) == 0 && len(empty) == 0 {
+		r.ok(name, strings.Join(present, ", ")+" in "+contextfs.ContextDir(root))
+		return
+	}
+
+	var detail []string
+	if len(present) > 0 {
+		detail = append(detail, strings.Join(present, ", "))
+	}
+	if len(missing) > 0 {
+		detail = append(detail, strings.Join(missing, " and ")+" absent")
+	}
+	if len(empty) > 0 {
+		detail = append(detail, strings.Join(empty, " and ")+" present but empty")
+	}
+	r.warn(name, strings.Join(detail, "; "),
+		fmt.Sprintf("write %s in %s\n"+
+			"apex loads both into every advisor call; without them review and ideas reason from\n"+
+			"project digests alone and produce generic advice about the code rather than advice for you",
+			strings.Join(append(missing, empty...), " and "), contextfs.ContextDir(root)))
 }
 
 func checkGoToolchain(ctx context.Context, r *report) {

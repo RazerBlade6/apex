@@ -61,8 +61,19 @@ type Sync struct {
 }
 
 // Executor selects the builder-loop dispatch target (DESIGN.md §9).
+//
+// Model and Effort are an addition M5 made for a reason worth stating: the
+// builder loop is routed separately from every [models.*] slot, because it is
+// not a provider call at all. DESIGN.md §9 is explicit that it runs on the
+// Claude Code subscription rather than on an API key, so putting it in the
+// model routing table would invite a user to point it at an API key that
+// would never be read. §9's verified argv shows `--model opus --effort high`,
+// which is what these default to; `apex do --model sonnet` overrides them for
+// one run.
 type Executor struct {
 	Default string `toml:"default"`
+	Model   string `toml:"model"`
+	Effort  string `toml:"effort"`
 }
 
 // Config is the whole of ~/.apex/config.toml.
@@ -123,6 +134,8 @@ func Default() Config {
 		},
 		Executor: Executor{
 			Default: "claudecode",
+			Model:   "opus",
+			Effort:  "high",
 		},
 	}
 }
@@ -197,6 +210,17 @@ func LockPath(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, "locks", name+".lock"), nil
+}
+
+// ExecLogPath returns the path of one dispatch's log file (DESIGN.md §5):
+// ~/.apex/logs/exec/<run-id>.log. The run id is Apex's own hex identifier, so
+// it never contains a path separator.
+func ExecLogPath(runID string) (string, error) {
+	root, err := Root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "logs", "exec", runID+".log"), nil
 }
 
 // Load reads ~/.apex/config.toml, filling any absent field from Default. If the
@@ -365,6 +389,14 @@ func (c *Config) Validate() []error {
 
 	if err := oneOf("executor.default", c.Executor.Default, ValidExecutors); err != nil {
 		errs = append(errs, err)
+	}
+	if c.Executor.Model == "" {
+		errs = append(errs, errors.New("executor.model is empty"))
+	}
+	if c.Executor.Effort != "" {
+		if err := oneOf("executor.effort", c.Executor.Effort, ValidEfforts); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	// Sort is avoided deliberately: map iteration order above is random, so

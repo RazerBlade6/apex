@@ -511,7 +511,7 @@ func TestStructured(t *testing.T) {
 		p := newTestProvider(t, api)
 
 		var got plan
-		if err := p.Structured(context.Background(), userRequest("plan"), schema, &got); err != nil {
+		if _, err := p.Structured(context.Background(), userRequest("plan"), schema, &got); err != nil {
 			t.Fatalf("Structured: %v", err)
 		}
 		if got.Title != "Fix chunking" || got.Effort != "medium" {
@@ -544,7 +544,7 @@ func TestStructured(t *testing.T) {
 		p := newTestProvider(t, api)
 
 		var got plan
-		err := p.Structured(context.Background(), userRequest("plan"), schema, &got)
+		_, err := p.Structured(context.Background(), userRequest("plan"), schema, &got)
 		if err == nil {
 			t.Fatal("Structured accepted a response that was not JSON")
 		}
@@ -558,7 +558,7 @@ func TestStructured(t *testing.T) {
 		p := newTestProvider(t, api)
 
 		var got plan
-		if err := p.Structured(context.Background(), userRequest("plan"), schema, &got); err == nil {
+		if _, err := p.Structured(context.Background(), userRequest("plan"), schema, &got); err == nil {
 			t.Fatal("Structured accepted an empty response")
 		}
 	})
@@ -571,7 +571,7 @@ func TestStructured(t *testing.T) {
 		p := newTestProvider(t, api)
 
 		var got plan
-		err := p.Structured(context.Background(), userRequest("plan"), schema, &got)
+		_, err := p.Structured(context.Background(), userRequest("plan"), schema, &got)
 		var perr *provider.Error
 		if !errors.As(err, &perr) {
 			t.Fatalf("err = %T (%v), want *provider.Error", err, err)

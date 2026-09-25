@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/RazerBlade6/apex/internal/provider"
 	"github.com/RazerBlade6/apex/internal/store"
 )
 
@@ -48,11 +49,13 @@ type proposedIdea struct {
 }
 
 // IdeasResult is what one `apex ideas` produced.
-// See the note on ReviewResult: Structured reports no usage, so neither
-// result type invents one.
 type IdeasResult struct {
 	Inserted   []store.Idea
 	Duplicates []string
+	// Usage and Model are what the call cost and what served it; see
+	// ReviewResult, which gained both for the same reason.
+	Usage provider.Usage
+	Model string
 }
 
 // Ideas proposes new projects and records the new ones as proposed.
@@ -88,11 +91,16 @@ func (a *Advisor) Ideas(ctx context.Context, actx *Context) (*IdeasResult, error
 	req := actx.Prompt(instruction).Build(route.Model, route.Effort, listMaxTokens)
 
 	var decoded ideasResponse
-	if err := p.Structured(ctx, req, schema, &decoded); err != nil {
+	usage, err := p.Structured(ctx, req, schema, &decoded)
+	if err != nil {
 		return nil, err
 	}
+	model := usage.Model
+	if model == "" {
+		model = route.Model
+	}
 
-	result := &IdeasResult{}
+	result := &IdeasResult{Usage: usage, Model: model}
 	now := a.now()
 	seen := map[string]bool{}
 
@@ -119,7 +127,7 @@ func (a *Advisor) Ideas(ctx context.Context, actx *Context) (*IdeasResult, error
 			Rationale:   strings.TrimSpace(idea.Rationale),
 			Status:      store.IdeaProposed,
 			CreatedAt:   now,
-			GeneratedBy: route.Model,
+			GeneratedBy: model,
 		}
 		if err := a.Store.InsertIdea(ctx, row); err != nil {
 			return nil, err

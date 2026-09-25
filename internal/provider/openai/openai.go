@@ -155,17 +155,17 @@ func (p *Provider) run(ctx context.Context, params sdk.ChatCompletionNewParams, 
 // additionalProperties false); a schema that breaks those rules is rejected
 // by the API with a message naming the offending field, which is the loud
 // failure worth having over a silently unenforced schema.
-func (p *Provider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) error {
+func (p *Provider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) (provider.Usage, error) {
 	if out == nil {
-		return fmt.Errorf("openai: Structured needs a destination to unmarshal into")
+		return provider.Usage{}, fmt.Errorf("openai: Structured needs a destination to unmarshal into")
 	}
 	params, err := p.params(req)
 	if err != nil {
-		return err
+		return provider.Usage{}, err
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(schema, &decoded); err != nil {
-		return fmt.Errorf("openai: output schema is not a JSON object: %w", err)
+		return provider.Usage{}, fmt.Errorf("openai: output schema is not a JSON object: %w", err)
 	}
 	params.ResponseFormat = sdk.ChatCompletionNewParamsResponseFormatUnion{
 		OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
@@ -180,11 +180,22 @@ func (p *Provider) Structured(ctx context.Context, req provider.Request, schema 
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 	defer stream.Close() //nolint:errcheck // nothing useful to do with a close failure here
 
-	var body strings.Builder
+	// Usage arrives on the final chunk, and only because params sets
+	// include_usage. It is tracked as the stream runs so that a call which
+	// was billed and then refused still reports what it spent
+	// (DESIGN.md §18).
+	var (
+		body  strings.Builder
+		usage provider.Usage
+	)
 	for stream.Next() {
-		for _, choice := range stream.Current().Choices {
+		chunk := stream.Current()
+		if u, ok := usageOf(chunk); ok {
+			usage = u
+		}
+		for _, choice := range chunk.Choices {
 			if refusal := choice.Delta.Refusal; refusal != "" {
-				return &provider.Error{
+				return usage, &provider.Error{
 					Provider: Name, Op: "structured", Kind: provider.KindRequest,
 					Message: provider.Truncate("the model refused the request: " + refusal),
 				}
@@ -193,18 +204,18 @@ func (p *Provider) Structured(ctx context.Context, req provider.Request, schema 
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return classify("structured", err)
+		return usage, classify("structured", err)
 	}
 	if strings.TrimSpace(body.String()) == "" {
-		return &provider.Error{
+		return usage, &provider.Error{
 			Provider: Name, Op: "structured", Kind: provider.KindUnknown,
 			Message: "the response carried no content",
 		}
 	}
 	if err := json.Unmarshal([]byte(body.String()), out); err != nil {
-		return fmt.Errorf("openai: decode structured response: %w", err)
+		return usage, fmt.Errorf("openai: decode structured response: %w", err)
 	}
-	return nil
+	return usage, nil
 }
 
 // usageOf reads the usage block, which is present only on the final chunk and

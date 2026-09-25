@@ -94,11 +94,16 @@ func (f *fakeCmdProvider) Stream(ctx context.Context, req provider.Request) (<-c
 	return ch, nil
 }
 
-func (f *fakeCmdProvider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) error {
+func (f *fakeCmdProvider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) (provider.Usage, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
-	return json.Unmarshal([]byte(f.JSON), out)
+	// Usage is reported here too, which is the whole point of M5's interface
+	// change: review and ideas carry the largest prompt Apex sends and were
+	// the only calls whose cost was invisible (DESIGN.md §18).
+	return provider.Usage{
+		InputTokens: 900, OutputTokens: 240, CacheWriteTokens: 850, Model: "fake-model-5",
+	}, json.Unmarshal([]byte(f.JSON), out)
 }
 
 // project creates a fake project directory under the fixture home.

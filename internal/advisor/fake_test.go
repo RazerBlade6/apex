@@ -93,19 +93,19 @@ func (f *fakeProvider) Stream(ctx context.Context, req provider.Request) (<-chan
 	return ch, nil
 }
 
-func (f *fakeProvider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) error {
+func (f *fakeProvider) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) (provider.Usage, error) {
 	f.enter(req)
 	defer f.leave()
 	if f.Err != nil {
-		return f.Err
+		return f.Usage, f.Err
 	}
 	// The schema is decoded rather than ignored so a malformed one fails
 	// here, the way a vendor would reject it.
 	var probe map[string]any
 	if err := json.Unmarshal(schema, &probe); err != nil {
-		return fmt.Errorf("fake: bad schema: %w", err)
+		return f.Usage, fmt.Errorf("fake: bad schema: %w", err)
 	}
-	return json.Unmarshal([]byte(f.JSON), out)
+	return f.Usage, json.Unmarshal([]byte(f.JSON), out)
 }
 
 // harness is an Advisor wired to a fake provider and a real in-memory store.

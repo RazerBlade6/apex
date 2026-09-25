@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/RazerBlade6/apex/internal/provider"
 	"github.com/RazerBlade6/apex/internal/store"
 )
 
@@ -62,15 +63,15 @@ type ReviewResult struct {
 	UnknownProjects []string
 	// ContextHash is the provenance stamp every inserted item carries.
 	ContextHash string
+	// Usage is what the call cost. It exists because Structured now reports
+	// it (DESIGN.md §18): this is the largest prompt Apex ever sends —
+	// identity context plus every digest — and until M5 it was the one call
+	// whose token and cache accounting was invisible.
+	Usage provider.Usage
+	// Model is the model that actually served the call, which is what every
+	// inserted item records as generated_by.
+	Model string
 }
-
-// Structured returns no provider.Usage, so neither ReviewResult nor
-// IdeasResult carries one. That is a real gap and is left visible rather than
-// filled with a zero: the review call carries the largest prompt Apex ever
-// sends — identity context plus every digest — and is therefore the call whose
-// cache behaviour matters most, yet it is the one call shape that reports no
-// tokens at all. Noted against DESIGN.md §8; closing it means changing the
-// Provider interface, which is not an M4 change to make quietly.
 
 // Review generates action items across the portfolio and records the new ones.
 //
@@ -108,11 +109,22 @@ func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, err
 	req := actx.Prompt(instruction).Build(route.Model, route.Effort, listMaxTokens)
 
 	var decoded reviewResponse
-	if err := p.Structured(ctx, req, schema, &decoded); err != nil {
+	usage, err := p.Structured(ctx, req, schema, &decoded)
+	if err != nil {
 		return nil, err
 	}
 
-	result := &ReviewResult{ContextHash: actx.Hash()}
+	// The serving model, not the route's alias. M4 could only record what it
+	// asked for, so action_items.generated_by said "opus" while
+	// digests.model said the dated id the CLI resolved it to — two columns,
+	// two answers, one run (DESIGN.md §18). The route's model is still the
+	// fallback, because a recorded blank is worse than a recorded intent.
+	model := usage.Model
+	if model == "" {
+		model = route.Model
+	}
+
+	result := &ReviewResult{ContextHash: actx.Hash(), Usage: usage, Model: model}
 	now := a.now()
 	seen := map[string]bool{}
 
@@ -150,7 +162,7 @@ func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, err
 			Status:      store.ItemProposed,
 			CreatedAt:   now,
 			UpdatedAt:   now,
-			GeneratedBy: route.Model,
+			GeneratedBy: model,
 			ContextHash: result.ContextHash,
 		}
 		if err := a.Store.InsertActionItem(ctx, row); err != nil {

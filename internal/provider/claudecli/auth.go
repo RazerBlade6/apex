@@ -5,76 +5,57 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/RazerBlade6/apex/internal/claudecmd"
 	"github.com/RazerBlade6/apex/internal/provider"
 )
 
-// Binary is the executable looked up on PATH.
-const Binary = "claude"
-
-// extraDirs are searched when the binary is not on PATH.
-//
-// The claude installer puts its launcher in ~/.local/bin, which is on an
-// interactive shell's PATH and frequently is not on a cron job's. `apex
-// doctor` already searched here for the executor; the provider has to agree
-// with it, so the lookup lives in one place and both call it.
-func extraDirs() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	return []string{filepath.Join(home, ".local", "bin")}
-}
+// Binary is the executable looked up on PATH. It is claudecmd's, re-exported
+// so callers of this package do not have to know where the lookup lives.
+const Binary = claudecmd.Binary
 
 // LookPath resolves the claude binary: PATH first, then the install
 // directories a login shell would have added.
 //
-// A missing binary comes back as a *provider.Error of KindUnavailable, so the
-// caller does not have to know that "not installed" is a distinct state from
-// "not logged in" — the classification already says so.
+// The resolution itself is claudecmd's, which is what DESIGN.md §18 asked M5
+// to arrange: `apex doctor` had one lookup for the executor and this package
+// had another, "they agree today", and two implementations of one question
+// drift. What this wrapper adds is the classification — a missing binary
+// comes back as a *provider.Error of KindUnavailable, so a caller does not
+// have to know that "not installed" is a distinct state from "not logged in".
 func LookPath() (string, error) {
-	if path, err := exec.LookPath(Binary); err == nil {
-		return path, nil
+	path, err := claudecmd.LookPath()
+	if err != nil {
+		return "", notInstalled("lookup", err)
 	}
-	for _, dir := range extraDirs() {
-		candidate := filepath.Join(dir, Binary)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return candidate, nil
-		}
-	}
-	return "", notInstalled("lookup", nil)
+	return path, nil
 }
 
 // resolveBinary honours an explicit path and otherwise looks one up.
 func resolveBinary(explicit string) (string, error) {
-	explicit = strings.TrimSpace(explicit)
-	if explicit == "" {
-		return LookPath()
-	}
-	info, err := os.Stat(explicit)
+	path, err := claudecmd.Resolve(explicit)
 	if err != nil {
 		return "", notInstalled("lookup", err)
 	}
-	if info.IsDir() {
-		return "", notInstalled("lookup", fmt.Errorf("%s is a directory", explicit))
-	}
-	return explicit, nil
+	return path, nil
 }
 
 // notInstalled builds the error for a claude binary that is not on this
 // machine. The path is named; nothing else about the environment is, because
 // an error string is a place secrets leak.
+//
+// A *claudecmd.NotFoundError already carries the message; anything else is
+// wrapped with its own text. Either way the Kind is what the caller reads.
 func notInstalled(op string, cause error) *provider.Error {
 	msg := fmt.Sprintf("the %s CLI was not found on PATH", Binary)
-	if dirs := extraDirs(); len(dirs) > 0 {
-		msg += " or in " + strings.Join(dirs, ", ")
-	}
-	if cause != nil {
+	var notFound *claudecmd.NotFoundError
+	if errors.As(cause, &notFound) {
+		msg = notFound.Error()
+		cause = notFound.Unwrap()
+	} else if cause != nil {
 		msg += ": " + cause.Error()
 	}
 	return &provider.Error{
@@ -85,6 +66,12 @@ func notInstalled(op string, cause error) *provider.Error {
 		Err:      cause,
 	}
 }
+
+// configureProcessGroup and killProcessGroup are claudecmd's, kept under
+// their original names so this package's call sites read unchanged.
+func configureProcessGroup(cmd *exec.Cmd) { claudecmd.SetProcessGroup(cmd) }
+
+func killProcessGroup(cmd *exec.Cmd) error { return claudecmd.KillProcessGroup(cmd) }
 
 // AuthStatus is what `claude auth status --json` reports.
 //
