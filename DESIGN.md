@@ -1611,6 +1611,16 @@ while the prompt still receives the whole file.
 
 ### Still open
 
+- **Windows is unsupported, and the v1.0.0 release build proved it.**
+  `internal/lock` calls `unix.Flock` unconditionally, so a `GOOS=windows` build does
+  not compile. §10 chose `flock(2)` for a good reason — the kernel releases it on
+  process death, which is what removes all stale-lock handling — but Windows has no
+  equivalent and the spec never said so. This is the platform version of the §7
+  lesson about constraints: a mechanism was chosen for one property and quietly
+  decided a portability question nobody was asked. Closing it means a `LockFileEx`
+  implementation behind a build tag, the way `executor/claudecode` already splits
+  `process_unix.go` / `process_other.go`. Nothing else in the codebase is
+  platform-bound.
 - **Turso offline-writes maturity in `tursogo`** — would remove the network
   dependency on writes and let `TursoBackend` become the sensible default. Verify
   against the driver before relying on it.

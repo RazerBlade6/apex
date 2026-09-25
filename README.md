@@ -40,6 +40,7 @@ context window, ten repositories do not.
 
 | Requirement | Why |
 |---|---|
+| **macOS or Linux** | `flock(2)` for locking; Windows is unsupported |
 | **Go 1.27+** | Building Apex |
 | **git** | Project introspection |
 | **[Claude Code](https://claude.com/claude-code)** | The builder loop (`apex do`, `apex start`) |
@@ -89,8 +90,11 @@ GOOS=darwin  GOARCH=arm64 go build -o apex-darwin-arm64  ./cmd/apex
 GOOS=darwin  GOARCH=amd64 go build -o apex-darwin-amd64  ./cmd/apex
 GOOS=linux   GOARCH=amd64 go build -o apex-linux-amd64   ./cmd/apex
 GOOS=linux   GOARCH=arm64 go build -o apex-linux-arm64   ./cmd/apex
-GOOS=windows GOARCH=amd64 go build -o apex-windows-amd64.exe ./cmd/apex
 ```
+
+**macOS and Linux only.** Apex uses `flock(2)` for its per-project and replica locks,
+which has no Windows equivalent in the standard library, so Windows is not a supported
+target. See [known limitations](#status-and-known-limitations).
 
 ### Run the tests
 
@@ -322,6 +326,9 @@ about the rough edges:
   of an item you already have. A duplicate you can dismiss beats a silently dropped one.
 - **Remote persistence is unimplemented.** `store.backend = "turso"` is designed but the Go
   driver was prerelease at the time of writing; `local` is the default and works fully.
+- **Windows is unsupported.** Locking is built on `flock(2)`, which POSIX provides and
+  Windows does not. A `LockFileEx` implementation behind a build tag would close this;
+  the rest of the codebase is already platform-clean and cgo-free.
 - **`review <project>` is a cost lever, not a quality one.** Narrowing to one project makes
   the advisor worse at exactly the cross-portfolio reasoning that justifies it.
 
