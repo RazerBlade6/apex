@@ -965,19 +965,31 @@ load it, which reads as an instruction to include it; it exists only to warn tha
 the portfolio has moved since the item was generated. Putting it in the brief would
 be exactly the project background this section forbids.
 
-> **Open decision: the dispatched agent also inherits the user's _global_
-> `CLAUDE.md`.** Project-level inheritance is the point, and it is why the brief can
-> stay short. User-global inheritance is a side effect nobody chose — both real M5
-> dispatches volunteered that they were departing from a convention in
-> `~/.claude/CLAUDE.md`. That means a user's personal Claude Code conventions
-> silently shape every Apex dispatch, including conventions that make no sense
-> here: "delegate code generation to a sub-agent" is redundant advice for a process
-> that *is* the delegation layer.
->
-> `--restricted` is not the answer — it strips the code-running tools the executor
-> exists to use. `--setting-sources project,local` is a candidate but governs
-> settings files, not `CLAUDE.md` discovery; verify before relying on it. This
-> needs a deliberate choice rather than a default inherited by accident.
+**Decided: a dispatch inherits the _project_ `CLAUDE.md` and not the user's
+global one.** Project inheritance is the design, and it is why the brief can stay
+short. Global inheritance was a side effect nobody chose — both real M5 dispatches
+volunteered that they were departing from a convention in `~/.claude/CLAUDE.md`,
+meaning a user's personal Claude Code conventions silently shape every Apex
+dispatch. Some of them are actively wrong here: "delegate code generation to a
+sub-agent" is redundant advice for a process that *is* the delegation layer.
+
+**The mechanism is unresolved, and no flag does this cleanly.** What was checked
+against `claude` 2.1.278:
+
+| Candidate | Why it does not work |
+|---|---|
+| `--restricted` | Strips the code-running tools the executor exists to use |
+| `--bare` | Skips `CLAUDE.md` discovery but forces `ANTHROPIC_API_KEY` and never reads OAuth — kills subscription auth |
+| `--safe-mode` | Keeps auth working, but disables *all* customizations including the **project** `CLAUDE.md`, skills and hooks |
+| `--setting-sources project,local` | Governs `settings.json` sources, not `CLAUDE.md` discovery |
+
+Remaining approaches, in preference order, to be settled empirically rather than by
+reading help text: scoping the config directory for the child process so the global
+file is not found while keychain auth still resolves; `--safe-mode` plus explicitly
+re-supplying the project `CLAUDE.md`; or, as a last resort, countering it in the
+brief, which is mitigation rather than exclusion. **If none is clean, say so rather
+than shipping something that half-works** — a dispatch that silently inherits half
+a config is worse than one that documents what it inherits.
 
 > **The builder loop runs on the Claude Code subscription, not on an API key.**
 > Apex is bring-your-own-key for the advisor loop only. Worth remembering for the
