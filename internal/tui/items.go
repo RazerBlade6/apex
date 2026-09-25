@@ -430,7 +430,11 @@ func (m *Model) renderItemRow(item store.ActionItem, selected bool) string {
 	}
 	line := fmt.Sprintf("%s%-7s %-12s %-7s %s",
 		marker, item.ID, item.Status, orDash(item.Effort), item.Title)
-	line = truncate(line, m.width)
+	// Truncate to the inner width, then pad back out to it: the selected row
+	// carries a background, and a highlight that stops at the end of the title
+	// looks like a fault rather than a cursor.
+	w := m.innerWidth()
+	line = padTo(truncate(line, w), w)
 	switch {
 	case selected:
 		return styleSelected.Render(line)
@@ -453,7 +457,7 @@ func (m *Model) renderRun(height int) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(styleDim.Render(truncate(line, m.width)))
+		b.WriteString(styleDim.Render(truncate(line, m.innerWidth())))
 	}
 	return b.String()
 }

@@ -78,7 +78,7 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 ### Build with a version stamp
 
 ```sh
-go build -ldflags "-X main.version=1.0.0" -o apex ./cmd/apex
+go build -ldflags "-X main.version=1.1.0" -o apex ./cmd/apex
 ```
 
 ### Cross-compile
@@ -183,17 +183,50 @@ a one-line crontab entry.
 `apex` with no arguments opens a [Bubble Tea](https://github.com/charmbracelet/bubbletea)
 interface with three views on `tab`:
 
-- **Chat** — conversation with your full context loaded, streamed and rendered as markdown
+- **Chat** — your prompts and the input field on the left, Apex's replies on the right,
+  streamed and rendered as markdown
 - **Items** — action items grouped by project, filtered with `f`, dispatched with `enter`
 - **Projects** — the registry with digest previews and staleness indicators
 
+Chat splits the two speakers into their own columns, so a one-line question does not get
+the same measure as the answer to it:
+
 ```
- Chat  Items  Projects                                        apex 1.0.0
-1 item(s) · filter: all
-ScholarRAG
-› AI-001  proposed  medium   Make chunking table-aware
-tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit
+                              Chat       Items       Projects
+
+  3 digest(s) · claude-cli/opus
+╭─────────────────────────────╮ ╭──────────────────────────────────────────────────────────╮
+│ what should I pick up this  │ │   ScholarRAG's chunking is the cheapest win: the table-  │
+│ evening?                    │ │   aware split is about forty lines and the ingestion     │
+│                             │ │   tests already cover it.                                │
+│                             │ │                                                          │
+│ ╭─────────────────────────╮ │ │                                                          │
+│ │ › Ask Apex…             │ │ │                                                          │
+│ │ ›                       │ │ │                                                          │
+│ ╰─────────────────────────╯ │ │                                                          │
+╰─────────────────────────────╯ ╰──────────────────────────────────────────────────────────╯
+  tab views · enter send · esc stop · ctrl+c quit                               apex 1.1.0
 ```
+
+Items and Projects keep a single pane. Below 60 columns of content, Chat falls back to one
+as well, rather than rendering two unreadably narrow ones:
+
+```
+                              Chat       Items       Projects
+
+  2 item(s) · filter: all
+╭──────────────────────────────────────────────────────────────────────────────────────────╮
+│ ScholarRAG                                                                               │
+│ › AI-001  proposed     medium  Make chunking table-aware                                 │
+│   AI-002  accepted     small   Cache embeddings between runs                             │
+│                                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────╯
+  tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit      apex 1.1.0
+```
+
+The palette is [gruvbox](https://github.com/morhetz/gruvbox) dark, written as truecolor hex
+and downsampled by termenv on terminals with a smaller palette. [`UI.md`](UI.md) is the
+full visual contract.
 
 ---
 
@@ -340,6 +373,10 @@ about the rough edges:
 concurrency, migration discipline, and the reasoning behind every decision, including the
 ones that turned out to be wrong and why. It's the authoritative document; this README is
 the summary.
+
+[`UI.md`](UI.md) is the visual contract for the terminal interface: the frame and its
+arithmetic, the two-box chat layout, and the palette. It is separate because appearance
+changes on a different clock from architecture.
 
 ## License
 

@@ -1240,10 +1240,22 @@ this project most wants to avoid.
 
 Bubble Tea, Elm architecture. Three views, switched by tab:
 
-- **Chat** (default) — input at the bottom, scrollback rendered through Glamour.
+- **Chat** (default) — the user's prompts and the input field in a narrow
+  left-hand box, Apex's replies in a wide right-hand one, rendered through
+  Glamour.
 - **Items** — action items grouped by project, filterable by status; `enter`
   dispatches.
 - **Projects** — the registry with digest previews and staleness indicators.
+
+**How all of that looks is specified in [UI.md](UI.md), not here.** The frame
+and its arithmetic, the two-box chat layout and its fallback, and the gruvbox
+palette are a visual contract that changes on a different clock from this
+document: the architecture below is largely settled, the appearance is not. The
+one thing worth repeating here is why it is a contract at all rather than a
+matter of taste — terminal layout is arithmetic, and arithmetic that is one
+column out does not produce a slightly wrong margin, it produces a border that
+wraps and takes the frame with it. `TestFrameFitsTheTerminal` and
+`TestChatPanesSplitSpeakers` hold the parts of it that a machine can check.
 
 Streaming is a natural fit: the provider's `Event` channel is drained by a
 `tea.Cmd` that returns one `streamDeltaMsg` per event and re-issues itself, so

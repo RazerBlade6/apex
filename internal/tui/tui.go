@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/RazerBlade6/apex/internal/advisor"
 	"github.com/RazerBlade6/apex/internal/config"
@@ -125,9 +126,10 @@ const (
 // and View directly.
 func New(opts Options) *Model {
 	m := &Model{opts: opts, width: 80, height: 24}
-	m.render = newRenderer(contentWidth(m.width))
+	m.render = newRenderer(m.replyWidth())
 	m.initChat()
 	m.initItems()
+	m.layout()
 	return m
 }
 
@@ -174,8 +176,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
-		m.render = newRenderer(contentWidth(m.width))
+		m.render = newRenderer(m.replyWidth())
 		m.layout()
+		// The cached renders were measured against the old frame, and a resize
+		// can cross the two-pane threshold as well as change the wrap width.
+		m.chat.invalidateRenders()
 		m.rerenderChat()
 		return m, nil
 
@@ -258,50 +263,111 @@ func (m *Model) setStatus(text string, kind statusKind) {
 	m.statusIs = kind
 }
 
-// View renders the whole frame: header, status line, body, footer.
+// innerWidth is the width every line inside the box is measured against.
+//
+// It is contentWidth, except in a terminal too narrow to hold it. The
+// 40-column floor on contentWidth is there to keep prose readable, but a floor
+// wider than the screen would push the border past the last column, where it
+// wraps and the whole frame comes apart. In that case the box gives up the
+// floor rather than the fit.
+func (m *Model) innerWidth() int {
+	w := contentWidth(m.width)
+	if fits := m.width - boxChrome; w > fits {
+		w = fits
+	}
+	if w < 1 {
+		return 1
+	}
+	return w
+}
+
+// frameWidth is the box's rendered outer width: the inner width plus the two
+// border columns and two padding columns. Every row of the frame is laid out
+// against it and the block is then centred in the terminal as a unit, so that
+// the tab row, the status line, the box and the footer share one left edge.
+func (m *Model) frameWidth() int {
+	return m.innerWidth() + boxChrome
+}
+
+// View renders the whole frame: tab row, blank, status line, body, footer.
+//
+// That is bodyHeight+6 rows against a terminal of m.height, leaving the one row
+// of slack the frame has always left — a frame that fills the last row scrolls
+// the alt screen on some terminals, and the cost of the slack is one unused
+// row.
 func (m *Model) View() string {
 	if !m.ready {
 		return "apex\n\nstarting…\n"
 	}
-	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n")
-	b.WriteString(m.statusLine())
-	b.WriteString("\n")
 
-	switch m.view {
-	case viewChat:
-		b.WriteString(m.chatView())
-	case viewItems:
-		b.WriteString(m.itemsView())
-	default:
-		b.WriteString(m.projectsView())
-	}
-	b.WriteString("\n")
-	b.WriteString(m.footer())
-	return b.String()
+	// Joined left-aligned first, which pads every row to the box's width, so
+	// that centring moves the block as a unit. Centring the rows individually
+	// would leave the status line and the footer drifting against the box.
+	block := lipgloss.JoinVertical(lipgloss.Left,
+		m.header(),
+		"",
+		styleGutter.Render(m.statusLine()),
+		m.bodyBlock(),
+		styleGutter.Render(m.footer()),
+	)
+	return lipgloss.PlaceHorizontal(m.width, lipgloss.Center, block)
 }
 
+// bodyBlock is the finished content area, already frameWidth wide.
+//
+// For the items and projects views — and for chat in a terminal too small for
+// two panes — that is the one bounding box, with the view's body inside it. The
+// chat view's two-pane layout brings its own pair of boxes, sized so that they
+// plus the column between them come to the same width.
+func (m *Model) bodyBlock() string {
+	if m.view == viewChat && m.chatTwoPane() {
+		return m.chatPanes()
+	}
+
+	var body string
+	switch m.view {
+	case viewChat:
+		body = m.chatView()
+	case viewItems:
+		body = m.itemsView()
+	default:
+		body = m.projectsView()
+	}
+
+	// Width is the inner width plus the padding, because lipgloss counts
+	// padding inside Width and adds the border outside it. MaxHeight is the
+	// backstop: content that somehow still overflows costs the bottom border
+	// rather than a scrolled screen.
+	return styleBox.
+		Width(m.innerWidth() + 2).
+		Height(m.bodyHeight()).
+		MaxHeight(m.bodyHeight() + 2).
+		Render(padLines(body, m.bodyHeight()))
+}
+
+// header is the tab row: the three views, centred over the box.
 func (m *Model) header() string {
 	tabs := make([]string, 0, len(views))
 	for _, v := range views {
-		label := fmt.Sprintf(" %s ", v)
+		label := fmt.Sprintf("  %s  ", v)
 		if v == m.view {
 			tabs = append(tabs, styleTabActive.Render(label))
 			continue
 		}
 		tabs = append(tabs, styleTab.Render(label))
 	}
-	left := strings.Join(tabs, "")
-	right := styleDim.Render("apex " + m.opts.Version)
-	return padBetween(left, right, m.width)
+	return lipgloss.PlaceHorizontal(m.frameWidth(), lipgloss.Center, strings.Join(tabs, tabGap))
 }
+
+// tabGap is the separation between two tabs. Together with the two columns of
+// padding inside each label it is what keeps the row from reading as one word.
+const tabGap = "   "
 
 func (m *Model) statusLine() string {
 	if m.status == "" {
-		return styleDim.Render(truncate(m.hint(), m.width))
+		return styleDim.Render(truncate(m.hint(), m.innerWidth()))
 	}
-	text := truncate(m.status, m.width)
+	text := truncate(m.status, m.innerWidth())
 	switch m.statusIs {
 	case statusError:
 		return styleError.Render(text)
@@ -334,13 +400,18 @@ func (m *Model) footer() string {
 	default:
 		keys = "tab views · ↑↓ move · r reload · ctrl+c quit"
 	}
-	return styleDim.Render(truncate(keys, m.width))
+	// The version sits here rather than on the tab row: a right-aligned element
+	// beside the tabs would make "centred" a lie, and the footer already has a
+	// left-hand half and nothing in its right.
+	inner := m.innerWidth()
+	return styleDim.Render(padBetween(truncate(keys, inner), "apex "+m.opts.Version, inner))
 }
 
-// bodyHeight is how many rows the view's body gets: everything but the
-// header, the status line, the footer, and the blank line above it.
+// bodyHeight is how many inner rows the box holds: everything but the tab row,
+// the blank line under it, the status line, the box's own two border rows, the
+// footer, and the row of slack the frame leaves at the bottom.
 func (m *Model) bodyHeight() int {
-	h := m.height - 4
+	h := m.height - 7
 	if h < 3 {
 		return 3
 	}

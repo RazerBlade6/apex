@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/RazerBlade6/apex/internal/advisor"
 	"github.com/RazerBlade6/apex/internal/config"
@@ -143,8 +144,8 @@ func TestStreamDeltasArriveAsMessages(t *testing.T) {
 	if got := m.chat.pending.String(); got != "ScholarRAG is closest." {
 		t.Fatalf("accumulated %q", got)
 	}
-	if !strings.Contains(m.chat.vp.View(), "ScholarRAG") {
-		t.Errorf("deltas are not visible in the scrollback:\n%s", m.chat.vp.View())
+	if !strings.Contains(m.chat.outVP.View(), "ScholarRAG") {
+		t.Errorf("deltas are not visible in the scrollback:\n%s", m.chat.outVP.View())
 	}
 
 	// EventDone carries what the turn cost, and the status line reports both
@@ -346,5 +347,118 @@ func TestBackgroundLoadsReachTheirOwnView(t *testing.T) {
 	m.setView(viewProjects)
 	if !strings.Contains(m.projectsView(), "a digest") {
 		t.Errorf("the projects view is still empty after tabbing to it:\n%s", m.projectsView())
+	}
+}
+
+// TestFrameFitsTheTerminal is the regression test for the bounding box.
+//
+// The content area is now a bordered box centred in the terminal, which turns
+// the layout into arithmetic: the border and its padding cost four columns and
+// two rows, so every line inside the box is measured against the inner width
+// rather than against the screen, and the box's own rows come out of the
+// height. Get either sum wrong by one and it does not look like an off-by-one
+// — the border wraps into garbage, or the frame is taller than the screen and
+// scrolls the alt buffer — and no other test in this package measures the whole
+// frame, because they all assert on one view's body with strings.Contains.
+//
+// The cramped 40x10 case is the one that actually caught something: the
+// 40-column floor on the inner width is wider than a 40-column terminal can
+// hold once the chrome is paid for, so the box has to give up the floor.
+func TestFrameFitsTheTerminal(t *testing.T) {
+	sizes := []struct{ w, h int }{{80, 24}, {100, 30}, {60, 20}, {200, 50}, {40, 10}}
+	for _, size := range sizes {
+		m := newTestModel(t, nil)
+		// Real rows, including ones long enough to need truncating, so the
+		// frame is measured with something in it.
+		m.Update(itemsLoadedMsg{
+			items: []store.ActionItem{{
+				ID: "AI-001", ProjectSlug: "p", Status: store.ItemProposed,
+				Title: "Replace the hand-rolled retry loop with the shared backoff helper",
+			}},
+			projects: []store.Project{{Slug: "p", Name: "Project"}},
+		})
+		m.Update(projectsLoadedMsg{
+			projects: []store.Project{{
+				Slug: "p", Name: "Project", Path: "/Users/someone/Development/a/deeply/nested/project",
+			}},
+			digests: []store.Digest{{ProjectSlug: "p", Body: strings.Repeat("digest prose ", 40), GeneratedAt: m.now()}},
+		})
+		m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+
+		for _, v := range views {
+			m.setView(v)
+			lines := strings.Split(m.View(), "\n")
+			if len(lines) > size.h {
+				t.Errorf("%dx%d %v: the frame is %d lines tall, which does not fit %d",
+					size.w, size.h, v, len(lines), size.h)
+			}
+			for i, line := range lines {
+				if w := lipgloss.Width(line); w > size.w {
+					t.Errorf("%dx%d %v: line %d is %d cells wide: %q", size.w, size.h, v, i+1, w, line)
+				}
+			}
+		}
+	}
+}
+
+// TestChatPanesSplitSpeakers is the regression test for the chat view's two
+// panes.
+//
+// The layout is one conversation split by speaker, and a turn routed to the
+// wrong column is invisible to every other test in this package: they all
+// assert on a single rendered string, which contains both sides either way. The
+// prompt pane must hold the user's turns and nothing else, the output pane
+// Apex's replies and its system notes, and the narrow fallback has to stay
+// reachable — at forty columns the left pane would be ten columns of text,
+// which is not a layout.
+func TestChatPanesSplitSpeakers(t *testing.T) {
+	m := newTestModel(t, nil)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if !m.chatTwoPane() {
+		t.Fatalf("100x30 did not take the two-pane path: inner=%d body=%d",
+			m.innerWidth(), m.bodyHeight())
+	}
+
+	m.chat.say(roleYou, "which stall is cheapest?")
+	h := &streamHandle{cancel: func() {}}
+	m.chat.stream = h
+	m.Update(streamEventMsg{h: h, ev: provider.Event{
+		Type: provider.EventTextDelta, Text: "ScholarRAG's retry loop.",
+	}, open: true})
+	// Cancelling is how a partial becomes a finished apex turn without a
+	// provider or a session row behind it.
+	m.cancelStream()
+
+	left, right := m.chat.inVP.View(), m.chat.outVP.View()
+	if !strings.Contains(left, "cheapest") {
+		t.Errorf("the prompt is not in the prompt pane:\n%s", left)
+	}
+	if strings.Contains(left, "ScholarRAG") {
+		t.Errorf("Apex's reply leaked into the prompt pane:\n%s", left)
+	}
+	if !strings.Contains(right, "ScholarRAG") {
+		t.Errorf("the reply is not in the output pane:\n%s", right)
+	}
+	if strings.Contains(right, "cheapest") {
+		t.Errorf("the prompt leaked into the output pane:\n%s", right)
+	}
+	// System lines are Apex speaking too, so they belong on the right.
+	if strings.Contains(left, "digests") {
+		t.Errorf("a system line landed in the prompt pane:\n%s", left)
+	}
+
+	// And the fallback, where the two speakers share one column again. The
+	// height is generous so that the assertions below measure the routing
+	// rather than how much of a three-row viewport happens to be on screen.
+	m.Update(tea.WindowSizeMsg{Width: 50, Height: 24})
+	if m.chatTwoPane() {
+		t.Fatalf("50x24 took the two-pane path: inner=%d body=%d",
+			m.innerWidth(), m.bodyHeight())
+	}
+	single := m.chat.outVP.View()
+	for _, want := range []string{"cheapest", "ScholarRAG", roleYou} {
+		if !strings.Contains(single, want) {
+			t.Errorf("the fallback scrollback is missing %q:\n%s", want, single)
+		}
 	}
 }

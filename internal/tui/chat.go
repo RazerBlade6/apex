@@ -3,18 +3,27 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/RazerBlade6/apex/internal/advisor"
 	"github.com/RazerBlade6/apex/internal/provider"
 )
 
-// The chat view (DESIGN.md §12): input at the bottom, scrollback above it
-// rendered through Glamour.
+// The chat view (UI.md §2): two side-by-side boxes, the user's prompts and
+// input on the left, Apex's replies on the right, rendered through Glamour.
+//
+// The two scrollbacks are independent. Aligning turn N's prompt with turn N's
+// reply would mean padding one column to the other's height, which a streaming
+// reply changes on every token; each pane therefore accumulates its own side of
+// the conversation and sticks to the bottom. In a terminal too narrow or too
+// short to hold two panes the view falls back to one box with the scrollback
+// above the input, which is the layout this view had before.
 //
 // Streaming is the pattern the spec names: the provider's Event channel is
 // drained by a tea.Cmd that returns one message per event and re-issues
@@ -45,8 +54,11 @@ type chatTurn struct {
 }
 
 type chatState struct {
-	vp viewport.Model
-	ta textarea.Model
+	// inVP holds the user's own turns, outVP everything Apex says. In
+	// fallback mode inVP is unused and outVP is the one scrollback.
+	inVP  viewport.Model
+	outVP viewport.Model
+	ta    textarea.Model
 
 	turns []chatTurn
 	actx  *advisor.Context
@@ -89,15 +101,25 @@ type observedMsg struct {
 
 func (m *Model) initChat() {
 	ta := textarea.New()
-	ta.Placeholder = "Ask about your portfolio…"
+	ta.Placeholder = placeholderWide
 	ta.Prompt = "› "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
+	// The input is chrome too, so it gets the same palette as the rest of the
+	// frame: the prompt and the cursor in the accent the user's own turns are
+	// rendered in, the placeholder in the same grey as every other hint. Only
+	// the focused prompt is coloured — a blurred input should recede.
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(colBlue)
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colGrey)
+	ta.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(colGrey)
+	ta.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(colGrey)
+	ta.Cursor.Style = lipgloss.NewStyle().Foreground(colBlue)
 	ta.SetHeight(3)
-	ta.SetWidth(contentWidth(m.width))
+	ta.SetWidth(m.innerWidth())
 
 	m.chat = chatState{
-		vp:      viewport.New(contentWidth(m.width), 10),
+		inVP:    viewport.New(m.innerWidth(), 10),
+		outVP:   viewport.New(m.innerWidth(), 10),
 		ta:      ta,
 		loading: true,
 	}
@@ -110,60 +132,195 @@ func (c *chatState) say(role, body string) {
 	c.turns = append(c.turns, chatTurn{role: role, body: body})
 }
 
+// chatTwoPane is the predicate for the side-by-side layout: two panes need room,
+// and below this threshold the chat view falls back to the single box it used to
+// be. At 40 columns the left pane would be ten columns of text, which is not a
+// layout; at fewer than eight body rows the input box alone would eat the pane.
+func (m *Model) chatTwoPane() bool {
+	return m.innerWidth() >= minTwoPaneWidth && m.bodyHeight() >= minTwoPaneHeight
+}
+
+// chatPaneWidths splits the inner width between the two panes.
+//
+// Each pane pays the four columns of border and padding that boxChrome already
+// deducted from innerWidth once, and one column of gap sits between them, so the
+// pair costs four columns and one gap more than the single box:
+//
+//	leftInner + rightInner = innerWidth - boxChrome - paneGap = innerWidth - 5
+//
+// which makes leftOuter + 1 + rightOuter come to exactly frameWidth, so chat
+// lines up with the box on the other two tabs. The right half is derived by
+// subtraction rather than rounded on its own: rounding both sides independently
+// drifts a column away from the frame at some widths.
+func (m *Model) chatPaneWidths() (left, right int) {
+	avail := m.innerWidth() - paneChrome - paneGap
+	left = int(math.Round(paneSplit * float64(avail)))
+	if left < minPaneInner {
+		left = minPaneInner
+	}
+	if left > maxPaneInner {
+		left = maxPaneInner
+	}
+	return left, avail - left
+}
+
+// replyWidth is the width Apex's output is wrapped to: the right pane in
+// two-pane mode, the whole box in fallback. The Glamour renderer is built at
+// this width, so getting it wrong wraps every reply to a column that is not
+// the one it is displayed in.
+func (m *Model) replyWidth() int {
+	if m.chatTwoPane() {
+		_, right := m.chatPaneWidths()
+		return right
+	}
+	return m.innerWidth()
+}
+
+// promptWidth is the mirror of replyWidth for the user's own turns.
+func (m *Model) promptWidth() int {
+	if m.chatTwoPane() {
+		left, _ := m.chatPaneWidths()
+		return left
+	}
+	return m.innerWidth()
+}
+
+// The placeholder is set per layout: the full sentence wraps onto two of the
+// three input rows in a narrow left pane, each carrying its own prompt glyph,
+// which reads as three empty inputs rather than one.
+const (
+	placeholderWide   = "Ask about your portfolio…"
+	placeholderNarrow = "Ask Apex…"
+)
+
 func (m *Model) layout() {
-	w := contentWidth(m.width)
+	m.items.height = m.bodyHeight()
+	m.projects.height = m.bodyHeight()
+
+	if m.chatTwoPane() {
+		left, right := m.chatPaneWidths()
+		// The input is its own bordered box pinned to the bottom of the left
+		// pane — two border rows around the three-row textarea — so the
+		// prompts above it get what is left, and the textarea pays the border
+		// and the padding a second time.
+		h := m.bodyHeight() - inputBoxHeight
+		if h < 1 {
+			h = 1
+		}
+		m.chat.inVP.Width, m.chat.inVP.Height = left, h
+		m.chat.outVP.Width, m.chat.outVP.Height = right, m.bodyHeight()
+		m.chat.ta.SetWidth(left - paneChrome)
+		m.chat.ta.Placeholder = placeholderNarrow
+		return
+	}
+
+	w := m.innerWidth()
 	m.chat.ta.SetWidth(w)
-	m.chat.vp.Width = w
+	m.chat.ta.Placeholder = placeholderWide
 	h := m.bodyHeight() - m.chat.ta.Height() - 1
 	if h < 3 {
 		h = 3
 	}
-	m.chat.vp.Height = h
-	m.items.height = m.bodyHeight()
-	m.projects.height = m.bodyHeight()
+	m.chat.inVP.Width, m.chat.inVP.Height = w, h
+	m.chat.outVP.Width, m.chat.outVP.Height = w, h
 }
 
-// rerenderChat rebuilds the scrollback from the turns and sticks to the
+// rerenderChat rebuilds both scrollbacks from the turns and sticks each to the
 // bottom, which is what a conversation wants: new text should be visible
 // without a keypress.
+//
+// Routing is by role: the user's turns go left, everything Apex says — replies,
+// system notes and the in-flight partial — goes right. In fallback mode there is
+// only one pane, so everything goes to outVP, which is the one the scroll keys
+// drive.
 func (m *Model) rerenderChat() {
-	var b strings.Builder
+	two := m.chatTwoPane()
+	var in, out strings.Builder
+	block := func(b *strings.Builder, s string) {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(s)
+	}
+
 	for i := range m.chat.turns {
 		t := &m.chat.turns[i]
 		if t.rendered == "" {
 			t.rendered = m.renderTurn(*t)
 		}
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
+		if two && t.role == roleYou {
+			block(&in, t.rendered)
+			continue
 		}
-		b.WriteString(t.rendered)
+		block(&out, t.rendered)
 	}
 	if m.chat.stream != nil {
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
+		var partial strings.Builder
+		if !two {
+			// The label only earns its row when both speakers share a column.
+			partial.WriteString(styleLabel.Render(roleApex))
+			partial.WriteString("\n")
 		}
-		b.WriteString(styleLabel.Render(roleApex))
-		b.WriteString("\n")
-		partial := m.chat.pending.String()
-		if strings.TrimSpace(partial) == "" {
-			b.WriteString(styleDim.Render("thinking…"))
+		// The partial is indented to Glamour's margin too. Without it a reply
+		// visibly jumps two columns right the moment the stream ends and the
+		// finished turn is re-rendered as markdown.
+		text := m.chat.pending.String()
+		if strings.TrimSpace(text) == "" {
+			partial.WriteString(styleDim.Render(indentBlock("thinking…", glamourMargin)))
 		} else {
-			b.WriteString(wrapPlain(partial, contentWidth(m.width)))
+			partial.WriteString(indentBlock(
+				wrapPlain(text, m.replyWidth()-glamourMargin), glamourMargin))
 		}
+		block(&out, partial.String())
 	}
-	m.chat.vp.SetContent(b.String())
-	m.chat.vp.GotoBottom()
+
+	m.chat.inVP.SetContent(in.String())
+	m.chat.inVP.GotoBottom()
+	m.chat.outVP.SetContent(out.String())
+	m.chat.outVP.GotoBottom()
 }
 
+// invalidateRenders drops the cached Glamour output. The cache is keyed on
+// nothing, so a resize — which changes the wrap width, and can cross the
+// two-pane threshold and with it whether a turn carries a role label — has to
+// clear it rather than redisplay text measured for the old frame.
+func (c *chatState) invalidateRenders() {
+	for i := range c.turns {
+		c.turns[i].rendered = ""
+	}
+}
+
+// renderTurn renders one turn for whichever pane owns it.
+//
+// In two-pane mode the per-turn role labels are dropped: the column already says
+// who is speaking, and a yellow "you" over every prompt in an eighteen-column
+// pane costs a row to repeat what the layout states. System lines stay distinct
+// by being dim. In fallback mode the labels remain, because there the two
+// speakers share one column and nothing else tells them apart.
 func (m *Model) renderTurn(t chatTurn) string {
+	two := m.chatTwoPane()
 	head := styleLabel.Render(t.role)
 	switch t.role {
 	case roleYou:
-		return head + "\n" + styleAccent.Render(wrapPlain(t.body, contentWidth(m.width)))
+		body := styleAccent.Render(wrapPlain(t.body, m.promptWidth()))
+		if two {
+			return body
+		}
+		return head + "\n" + body
 	case roleSystem:
-		return styleDim.Render(wrapPlain(t.role+" "+t.body, contentWidth(m.width)))
+		if two {
+			// Indented to Glamour's margin so the right pane has one left
+			// edge rather than two.
+			return styleDim.Render(indentBlock(
+				wrapPlain(t.body, m.replyWidth()-glamourMargin), glamourMargin))
+		}
+		return styleDim.Render(wrapPlain(t.role+" "+t.body, m.replyWidth()))
 	default:
-		return head + "\n" + m.render.markdown(t.body)
+		body := m.render.markdown(t.body)
+		if two {
+			return body
+		}
+		return head + "\n" + body
 	}
 }
 
@@ -182,9 +339,46 @@ func (m *Model) chatHint() string {
 	return fmt.Sprintf("%d digest(s) · %s/%s", n, route.Provider, route.Model)
 }
 
+// chatView is the fallback body: one scrollback above the input, to be wrapped
+// in the single bounding box the other two views use.
 func (m *Model) chatView() string {
-	body := padLines(m.chat.vp.View(), m.chat.vp.Height)
-	return body + "\n" + m.chat.ta.View()
+	body := padLines(m.chat.outVP.View(), m.chat.outVP.Height)
+	// A blank row between the scrollback and the input. layout() already
+	// reserves it; joining with a single newline instead spent it as padding
+	// under the input, where it separated nothing.
+	return body + "\n\n" + m.chat.ta.View()
+}
+
+// chatPanes is the two-pane body: two finished boxes side by side, already the
+// frame's full width.
+//
+// The gap between them is the right pane's left margin, which is why the
+// arithmetic in chatPaneWidths counts it. Both panes are the same height as the
+// single box, and the input is its own box pinned to the bottom of the left one.
+func (m *Model) chatPanes() string {
+	leftInner, rightInner := m.chatPaneWidths()
+	h := m.bodyHeight()
+	taH := m.chat.ta.Height()
+
+	// Width is the pane's inner width less the input box's own padding, so the
+	// box renders flush with the pane's text column.
+	input := styleBox.
+		Width(leftInner - 2).
+		Height(taH).
+		MaxHeight(taH + 2).
+		Render(m.chat.ta.View())
+
+	left := styleBox.
+		Width(leftInner + 2).
+		Height(h).
+		MaxHeight(h + 2).
+		Render(padLines(padLines(m.chat.inVP.View(), m.chat.inVP.Height)+"\n"+input, h))
+	right := styleBoxRight.
+		Width(rightInner + 2).
+		Height(h).
+		MaxHeight(h + 2).
+		Render(padLines(m.chat.outVP.View(), h))
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
 func (m *Model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -235,8 +429,10 @@ func (m *Model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat.ta, cmd = m.chat.ta.Update(tea.KeyMsg{Type: tea.KeyEnter})
 			return m, cmd
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d":
+			// Apex's output is the pane the user is reading; their own
+			// prompts stay pinned to the bottom.
 			var cmd tea.Cmd
-			m.chat.vp, cmd = m.chat.vp.Update(msg)
+			m.chat.outVP, cmd = m.chat.outVP.Update(msg)
 			return m, cmd
 		}
 	}

@@ -18,38 +18,121 @@ import (
 // it is and Glamour renders only into the TUI's own scrollback, which is never
 // redirected anywhere.
 
-// Colours are named from the 256-colour palette rather than truecolor hex, so
-// the application degrades sensibly in a terminal that has fewer.
+// The palette is gruvbox dark, named as truecolor hex (UI.md §3).
+//
+// Hex rather than 256-colour indices because lipgloss hands the colour to
+// termenv, which downsamples it to the nearest entry the terminal actually
+// advertises. Naming the exact gruvbox value therefore gets gruvbox where
+// truecolor is available and the closest approximation where it is not, which
+// is strictly better than picking an index that is already an approximation
+// everywhere. Gruvbox's own fg1 (#ebdbb2) is deliberately absent: primary text
+// is left as the terminal's own foreground, so the frame sits on whatever
+// background the user has rather than fighting it.
 var (
-	colAccent = lipgloss.Color("39")  // the active tab, the user's own turns
-	colDim    = lipgloss.Color("244") // chrome
-	colWarn   = lipgloss.Color("214")
-	colError  = lipgloss.Color("203")
-	colOK     = lipgloss.Color("78")
+	colBG0Hard = lipgloss.Color("#1d2021") // text on a bright fill
+	colBG1     = lipgloss.Color("#3c3836") // dark grey fill
+	colBG3     = lipgloss.Color("#665c54") // the border
+	colGrey    = lipgloss.Color("#928374") // chrome and dim text
+	colFG0     = lipgloss.Color("#fbf1c7") // the brightest text
+	colRed     = lipgloss.Color("#fb4934")
+	colGreen   = lipgloss.Color("#b8bb26")
+	colYellow  = lipgloss.Color("#fabd2f")
+	colBlue    = lipgloss.Color("#83a598")
+	colOrange  = lipgloss.Color("#fe8019")
 )
 
 var (
-	styleTab       = lipgloss.NewStyle().Foreground(colDim)
-	styleTabActive = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(colAccent).Bold(true)
-	styleDim       = lipgloss.NewStyle().Foreground(colDim)
-	styleWarn      = lipgloss.NewStyle().Foreground(colWarn)
-	styleError     = lipgloss.NewStyle().Foreground(colError)
-	styleOK        = lipgloss.NewStyle().Foreground(colOK)
-	styleAccent    = lipgloss.NewStyle().Foreground(colAccent)
-	styleSelected  = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
-	styleLabel     = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	styleTab       = lipgloss.NewStyle().Foreground(colGrey)
+	styleTabActive = lipgloss.NewStyle().Foreground(colBG0Hard).Background(colBlue).Bold(true)
+	styleDim       = lipgloss.NewStyle().Foreground(colGrey)
+	// Warnings are orange rather than yellow so that a warning cannot be
+	// mistaken for a section label, which is the other thing on screen with a
+	// bold warm foreground.
+	styleWarn   = lipgloss.NewStyle().Foreground(colOrange)
+	styleError  = lipgloss.NewStyle().Foreground(colRed)
+	styleOK     = lipgloss.NewStyle().Foreground(colGreen)
+	styleAccent = lipgloss.NewStyle().Foreground(colBlue)
+	// styleSelected carries a background, so every row it renders has to be
+	// padded to the full inner width first: a highlight that stops at the end
+	// of the text has a ragged right edge and reads as a rendering fault
+	// rather than as a cursor.
+	styleSelected = lipgloss.NewStyle().Foreground(colFG0).Background(colBG1).Bold(true)
+	styleLabel    = lipgloss.NewStyle().Foreground(colYellow).Bold(true)
+
+	// styleBox is the bounding box around the content area. Width is set per
+	// frame, because it depends on the terminal.
+	styleBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colBG3).
+			Padding(0, 1)
+
+	// styleBoxRight is the chat view's output pane. The one column between the
+	// two panes is its left margin rather than a spacer string, so that
+	// JoinHorizontal cannot lose it — and chatPaneWidths counts it, because a
+	// margin widens the rendered block.
+	styleBoxRight = styleBox.MarginLeft(paneGap)
 )
 
-// minWidth and maxWidth bound the wrap. The floor keeps a narrow pane
-// readable; the ceiling exists because prose measurably stops being readable
-// somewhere past a hundred columns, and a full-screen terminal is wider.
+// minWidth and maxWidth bound the wrap. The floor keeps a narrow pane readable.
+// The ceiling used to be 100, on the reasoning that prose stops being readable
+// somewhere past a hundred columns — true of a single column of prose, but the
+// chat view no longer is one. Apex's replies get roughly two thirds of the
+// width and the prompts the rest, so the ceiling that matters for reading is
+// the pane's, not the frame's. At 100 the frame occupied about 40% of a wide
+// display and looked marooned in the middle of it.
 const (
 	minContentWidth = 40
-	maxContentWidth = 100
+	maxContentWidth = 200
 )
 
+// boxChrome is what the bounding box costs horizontally: two border columns
+// and two padding columns. It is the difference between the inner text width
+// and the box's rendered width.
+const boxChrome = 4
+
+// boxGutter is one side of that chrome: a border column and a padding column.
+// The rows that sit outside the box are indented by it so that their text
+// starts in the same column as the text inside the box.
+const boxGutter = boxChrome / 2
+
+// The chat view's two panes (UI.md §2). paneChrome is what one pane's
+// border and padding cost horizontally — the same four columns as boxChrome,
+// named separately because it is paid twice over — and paneGap is the single
+// column between them. The split is roughly a third to the prompts and the rest
+// to Apex's output, bounded so the left pane is neither unreadably narrow nor
+// wider than a prompt needs on a very wide terminal. maxPaneInner tracks
+// maxContentWidth: left at 34 while the frame doubled, every new column would
+// land in the right pane and the third-to-two-thirds split would quietly become
+// a sixth to five sixths.
+const (
+	paneChrome   = boxChrome
+	paneGap      = 1
+	paneSplit    = 0.32
+	minPaneInner = 18
+	maxPaneInner = 68
+
+	// inputBoxHeight is the rendered height of the input's own box inside the
+	// left pane: two border rows around the three-row textarea.
+	inputBoxHeight = 5
+
+	// minTwoPaneWidth and minTwoPaneHeight are where the side-by-side layout
+	// stops being one, and chat falls back to a single box.
+	minTwoPaneWidth  = 60
+	minTwoPaneHeight = 8
+)
+
+// styleGutter indents the status line and the footer to that column.
+//
+// Aligning them with the box's outer edge instead looks right on the left and
+// wrong on the right: the footer's right-hand half would stop two columns
+// short of the border on each side, which reads as a rendering slip rather
+// than as a margin.
+var styleGutter = lipgloss.NewStyle().PaddingLeft(boxGutter)
+
+// contentWidth is the inner text width: the columns a line inside the box
+// actually gets, with the border and the padding already deducted.
 func contentWidth(total int) int {
-	w := total - 2
+	w := total - boxChrome
 	if w < minContentWidth {
 		return minContentWidth
 	}
@@ -170,6 +253,47 @@ func padBetween(left, right string, width int) string {
 		return truncate(left, width)
 	}
 	return left + strings.Repeat(" ", width-lw-rw) + right
+}
+
+// padTo pads a line out to exactly width display cells.
+//
+// It exists for the rows that are rendered with a background: without it the
+// highlight ends where the text does. Width is measured in cells rather than
+// bytes, and rendered cells rather than raw ones, so a styled or double-width
+// line still lines up.
+func padTo(s string, width int) string {
+	gap := width - lipgloss.Width(s)
+	if gap <= 0 {
+		return s
+	}
+	return s + strings.Repeat(" ", gap)
+}
+
+// glamourMargin is the two-column margin Glamour puts on a document.
+//
+// It is a constant here because it cannot be reached through the options
+// Glamour exposes: WithAutoStyle resolves the light or dark config through an
+// unexported helper, so overriding the margin would mean reimplementing the
+// terminal background detection to rebuild the config by hand. Matching the
+// margin is cheaper and safer than fighting it, so the plain-text blocks that
+// share a pane with rendered markdown are wrapped narrower and indented by it.
+const glamourMargin = 2
+
+// indentBlock shifts every line of a block right by n columns, leaving blank
+// lines alone so they do not become trailing whitespace.
+func indentBlock(s string, n int) string {
+	if n <= 0 || s == "" {
+		return s
+	}
+	pad := strings.Repeat(" ", n)
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if l == "" {
+			continue
+		}
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 // padLines makes a block exactly n lines tall, so the frame does not jump as

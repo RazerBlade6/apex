@@ -152,7 +152,10 @@ func (m *Model) renderProjectRow(p store.Project, selected bool) string {
 	if ok {
 		age = digestAge(m.now(), d.GeneratedAt)
 	}
-	line := truncate(fmt.Sprintf("%s%-22s %-12s %s", marker, p.Name, age, p.Path), m.width)
+	// Padded out to the full inner width, so the selected row's background
+	// reaches the edge of the box instead of stopping at the path.
+	w := m.innerWidth()
+	line := padTo(truncate(fmt.Sprintf("%s%-22s %-12s %s", marker, p.Name, age, p.Path), w), w)
 	switch {
 	case selected:
 		return styleSelected.Render(line)
@@ -177,7 +180,7 @@ func (m *Model) renderDigestPreview(height int) string {
 
 	head := styleLabel.Render(p.Name) + styleDim.Render(fmt.Sprintf("  %s · %s",
 		digestAge(m.now(), d.GeneratedAt), orDash(d.Model)))
-	body := wrapPlain(d.Body, contentWidth(m.width))
+	body := wrapPlain(d.Body, m.innerWidth())
 	lines := strings.Split(body, "\n")
 	if len(lines) > height-1 {
 		lines = lines[:max(height-2, 1)]
