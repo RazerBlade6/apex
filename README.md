@@ -78,7 +78,7 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 ### Build with a version stamp
 
 ```sh
-go build -ldflags "-X main.version=1.1.1" -o apex ./cmd/apex
+go build -ldflags "-X main.version=1.2.0" -o apex ./cmd/apex
 ```
 
 ### Cross-compile
@@ -206,24 +206,38 @@ the same measure as the answer to it:
 │ │ ›                       │ │ │                                                          │
 │ ╰─────────────────────────╯ │ │                                                          │
 ╰─────────────────────────────╯ ╰──────────────────────────────────────────────────────────╯
-  tab views · enter send · esc stop · ctrl+c quit                               apex 1.1.1
+  tab views · enter send · esc stop · ctrl+c quit                               apex 1.2.0
 ```
 
-Items and Projects keep a single pane. Below 60 columns of content, Chat falls back to one
-as well, rather than rendering two unreadably narrow ones:
+Items is three boxes: the selected item's project on the left, the items as cards grouped by
+project in the middle, and the item in full on the right. It opens with nothing selected and
+the side boxes empty; `↑↓` picks an item and `esc` puts it back:
 
 ```
                               Chat       Items       Projects
 
-  2 item(s) · filter: all
-╭──────────────────────────────────────────────────────────────────────────────────────────╮
-│ ScholarRAG                                                                               │
-│ › AI-001  proposed     medium  Make chunking table-aware                                 │
-│   AI-002  accepted     small   Cache embeddings between runs                             │
-│                                                                                          │
-╰──────────────────────────────────────────────────────────────────────────────────────────╯
-  tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit      apex 1.1.1
+  2 item(s) · filter: all · pgup/pgdn scroll the detail
+╭─────────────────────────╮ ╭──────────────────────────────────╮ ╭─────────────────────────╮
+│ ScholarRAG              │ │ ScholarRAG                       │ │ Make chunking           │
+│ ~/Development/ScholarR… │ │ ╭──────────────────────────────╮ │ │ table-aware             │
+│                         │ │ │ Make chunking table-aware    │ │ │ AI-001 · proposed ·     │
+│ status  active          │ │ │ AI-001 · 2d ago     proposed │ │ │ medium effort           │
+│ branch  main · 4f2c9e1… │ │ ╰──────────────────────────────╯ │ │ created 2d ago          │
+│ commit  3h ago          │ │ ╭──────────────────────────────╮ │ │                         │
+│ Add ingestion tests fo… │ │ │ Cache embeddings between ru… │ │ │ Changes                 │
+│ digest  1d ago          │ │ │ AI-002 · 5h ago     accepted │ │ │ Split ingested PDFs on  │
+│ items   2 open · 0 done │ │ ╰──────────────────────────────╯ │ │ table boundaries        │
+│                         │ │                                  │ │ instead of fixed token  │
+│ Digest                  │ │                                  │ │ windows, so a table is  │
+│ A retrieval pipeline    │ │                                  │ │ never cut in half.      │
+│ over research papers.   │ │                                  │ │                         │
+│ …                       │ │                                  │ │ …                       │
+╰─────────────────────────╯ ╰──────────────────────────────────╯ ╰─────────────────────────╯
+  tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit      apex 1.2.0
 ```
+
+Projects keeps a single pane. Below 60 columns of content Chat falls back to one pane, and
+below 76 Items falls back to a single list, rather than rendering unreadably narrow ones.
 
 The palette is [gruvbox](https://github.com/morhetz/gruvbox) dark, written as truecolor hex
 and downsampled by termenv on terminals with a smaller palette. [`UI.md`](UI.md) is the

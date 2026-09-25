@@ -148,8 +148,15 @@ func (m *Model) itemsHint() string {
 		filter = "all"
 	}
 	hint := fmt.Sprintf("%d item(s) · filter: %s", len(m.items.visible()), filter)
-	if len(m.items.rows) > 0 && m.items.cursor < 0 {
+	// The scroll keys are named here rather than in the footer, and only
+	// once there is a detail box to scroll: in the footer they pushed the key
+	// list past the point where the version fits, which dropped it from the
+	// Items tab at every width under about a hundred columns.
+	switch {
+	case len(m.items.rows) > 0 && m.items.cursor < 0:
 		hint += " · ↑↓ to select"
+	case m.items.cursor >= 0 && m.itemsThreePane():
+		hint += " · pgup/pgdn scroll the detail"
 	}
 	return hint
 }

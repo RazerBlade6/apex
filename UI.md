@@ -205,6 +205,12 @@ The right box scrolls on its own with `pgup` and `pgdn` (or `ctrl+u` and
 row. While a dispatch runs, and until `esc` clears it afterwards, the right box
 shows the dispatch log instead of the item.
 
+The scroll keys are named on the status line while an item is selected, not in
+the footer. The footer is where the version sits, at its right-hand end, and it
+gives way first when the key list is too long to share the row; with the scroll
+keys in it the Items tab lost its version at every width under about a hundred
+columns.
+
 ## 4. The palette
 
 Gruvbox dark, written as hex rather than 256-colour indices. lipgloss hands

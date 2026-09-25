@@ -7,7 +7,7 @@ import (
 // version is the build version, overridable at link time:
 //
 //	go build -ldflags "-X main.version=1.2.3" ./cmd/apex
-var version = "1.1.1"
+var version = "1.2.0"
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{

@@ -406,7 +406,7 @@ func (m *Model) footer() string {
 	case viewChat:
 		keys = "tab views · enter send · esc stop · ctrl+c quit"
 	case viewItems:
-		keys = "tab views · ↑↓ move · f filter · enter dispatch · pgup/pgdn scroll · r reload · ctrl+c quit"
+		keys = "tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit"
 	default:
 		keys = "tab views · ↑↓ move · r reload · ctrl+c quit"
 	}
