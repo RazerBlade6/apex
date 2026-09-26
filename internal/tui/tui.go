@@ -215,7 +215,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// chat was focused and were dropped — leaving both views reading
 	// "loading…" forever with no error anywhere. The same applies to a stream
 	// or a dispatch the user tabbed away from mid-flight.
-	case contextLoadedMsg, streamEventMsg, observedMsg:
+	case contextLoadedMsg, streamEventMsg, observedMsg, proposalsMsg, recordedMsg, contextReloadedMsg:
 		return m.updateChat(msg)
 	case itemsLoadedMsg, dispatchLineMsg, dispatchDoneMsg, gitStateMsg:
 		return m.updateItems(msg)
@@ -251,6 +251,7 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // running would keep a subprocess alive past the last frame.
 func (m *Model) quit() tea.Cmd {
 	m.cancelStream()
+	m.cancelProposing()
 	m.cancelDispatch()
 	return tea.Quit
 }
@@ -258,7 +259,9 @@ func (m *Model) quit() tea.Cmd {
 func (m *Model) setView(v view) {
 	m.view = view((int(v) + len(views)) % len(views))
 	m.layout()
-	if m.view == viewChat {
+	// The input stays blurred under an open checklist, which has the
+	// keyboard until it is answered.
+	if m.view == viewChat && m.chat.proposal == nil {
 		m.chat.ta.Focus()
 		return
 	}
@@ -405,6 +408,9 @@ func (m *Model) footer() string {
 	switch m.view {
 	case viewChat:
 		keys = "tab views · enter send · esc stop · ctrl+c quit"
+		if m.chat.proposal != nil {
+			keys = "tab views · ↑↓ move · space tick · y add · n discard · ctrl+c quit"
+		}
 	case viewItems:
 		keys = "tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit"
 	default:

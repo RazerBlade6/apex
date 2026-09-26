@@ -164,6 +164,15 @@ with a name and a path; Apex generates the summary line beneath each entry on
 `apex sync`. This is the only file that answers "which projects exist and where
 do they live," which is a job per-project files genuinely cannot do.
 
+Apex also **appends** to it: `apex start` adds an entry for the project it
+creates, because a project Apex made and did not register would be invisible to
+every later command. Appending is the only structural write Apex makes. It never
+reorders or rewrites what is there, and it reads the file back afterwards: an
+entry that would not parse back to the same name and path — a title ending in
+`#` was one, before headings followed CommonMark's closing-sequence rule — is
+refused rather than saved, since an entry Apex cannot find again is the failure
+the append exists to prevent.
+
 The generated summary carries an explicit marker. Identifying it *positionally* —
 "the line after `path:`" — works but makes a hand-edit that shifts a line silently
 destructive. A marker makes the round trip safe by construction, and the format has
@@ -348,6 +357,15 @@ Sources, in priority order:
 
 Digests are cached against a `source_hash`. `apex sync` regenerates only projects
 whose hash changed, which keeps a full sync cheap once warm.
+
+**A registered project with no digest is still in the context.** Between `apex
+start` and the next `apex sync` a project has a row and a `PROJECT.md` and nothing
+else, and the advisor used to see only digests — so the project Apex had just
+created was the one project it did not know about, and an action item proposed for
+it was skipped as naming no project at all. It is now listed after the digests,
+described from its own `PROJECT.md` (bounded, since a hand-written file has no
+digest's length limit), and it may be given action items. It joins the context
+hash only when there is one, so a fully synced portfolio hashes as it always did.
 
 **The hash covers every source, and the dirty state is a digest of `git status
 --short`, never a boolean.** A boolean is broken in the case that matters most: once
@@ -1291,6 +1309,20 @@ dispatch is more than a subprocess — it takes the project lock, opens the
 The TUI therefore takes a `Dispatcher` callback and streams whatever it writes,
 over an `io.Pipe` drained by the same re-issuing `tea.Cmd` as a model stream.
 
+**The chat proposes action items; the user approves them.** When a conversation
+arrives at concrete work, the reply ends with a fenced `apex-items` block of
+proposed items, and `/items` asks for the conversation as items through a
+Structured call against the same schema as `apex review`. Either way the
+proposals appear as a checklist and nothing is written until the user answers it;
+approved items go through the same resolution, deduplication and provenance stamp
+as a review (`Advisor.RecordItems` is the second half of `Review`), land as
+`proposed`, and the items view reloads so they can be dispatched. A fence rather
+than a second call because the proposals belong to the reply that argued for
+them, and the prose streams; the block is hidden while it arrives, taken out of
+what is displayed, and kept in the history so the next turn knows what it
+proposed. The chat prompt lists the open items on every turn, because an item
+approved three turns ago is one the model must not propose again.
+
 **`enter` asks before it dispatches.** This is an addition to the line above, and
 it is deliberate: a dispatch takes an exclusive lock, spends subscription quota
 from the same window as the user's own sessions, and lets an agent edit a real
@@ -1411,6 +1443,14 @@ model should only do the part that genuinely varies.
 **Tier 1 — Apex, deterministic.** Create the directory, `git init`, write
 `PROJECT.md` from the idea, add a `.gitignore`, register in `PROJECTS.md`. Identical
 for every project and must be correct, so no model is involved.
+
+Registration is checked **before** the directory is created. An entry of the same
+name pointing elsewhere would have the append skipped; a name that slugifies onto
+another entry's key is a collision sync cannot settle; and a row still holding the
+key at another path — a project taken out of `PROJECTS.md` but never pruned — would
+be matched as having *moved* into the new directory, handing it that project's
+digest and action items. Each is a way to create a project and then lose it, so each
+is refused with `--name` or `--path` as the way out.
 
 **Tier 2 — the ecosystem's own scaffolder,** where one fits the stack: `go mod init`,
 `cargo new`, `uv init`, `npm create vite`. These are maintained by the ecosystem and

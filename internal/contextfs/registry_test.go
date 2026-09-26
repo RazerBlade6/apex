@@ -568,3 +568,50 @@ func TestRegistrySaveIsAtomicAndSurgical(t *testing.T) {
 		t.Errorf("mode = %o, want 600 (the mode the file already had)", perm)
 	}
 }
+
+// TestRegistryHeadingsRoundTrip: Apex appends entries to this file, so a name
+// it writes has to be the name it reads back. A closing run of '#' is stripped
+// only after a space, as CommonMark has it, so "C#" names C#.
+func TestRegistryHeadingsRoundTrip(t *testing.T) {
+	tests := map[string]string{
+		"## C#\npath: ~/c\n":        "C#",
+		"## C# ##\npath: ~/c\n":     "C#",
+		"## Atlas ##\npath: ~/a\n":  "Atlas",
+		"## Atlas\t#\npath: ~/a\n":  "Atlas",
+		"## F# Tools\npath: ~/f\n":  "F# Tools",
+		"## Plain\npath: ~/plain\n": "Plain",
+	}
+	for body, want := range tests {
+		entries := ParseRegistry([]byte(body), "PROJECTS.md").Entries()
+		if len(entries) != 1 || entries[0].Name != want {
+			t.Errorf("%q parsed as %+v, want one entry named %q", body, entries, want)
+		}
+	}
+}
+
+// TestRegistryAddEntryReadsBack: an entry Apex appends is one it can find
+// again, and a name that could not be is refused with the file untouched.
+func TestRegistryAddEntryReadsBack(t *testing.T) {
+	body := "# Projects\n\n## Atlas\npath: ~/Development/Atlas\n"
+	r := ParseRegistry([]byte(body), "PROJECTS.md")
+
+	if err := r.AddEntry("C#", "~/Development/C#"); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+	if e, ok := r.Lookup("C#"); !ok || e.Path != "~/Development/C#" {
+		t.Errorf("the appended entry does not read back: %+v, %v", e, ok)
+	}
+
+	for _, name := range []string{"two\nlines", "###"} {
+		before := string(r.Bytes())
+		if err := r.AddEntry(name, "~/Development/x"); err == nil {
+			t.Errorf("AddEntry(%q) succeeded; it cannot be read back as written", name)
+		}
+		if after := string(r.Bytes()); after != before {
+			t.Errorf("a refused AddEntry(%q) still changed the file:\n%s", name, after)
+		}
+	}
+	if len(r.Problems()) != 0 {
+		t.Errorf("appending left problems behind: %v", r.Problems())
+	}
+}

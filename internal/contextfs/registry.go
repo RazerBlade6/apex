@@ -298,9 +298,13 @@ func (r *Registry) AddEntry(name, path string) error {
 	if path == "" {
 		return fmt.Errorf("registry: entry %q needs a path", name)
 	}
+	if strings.ContainsAny(name+path, "\r\n") {
+		return fmt.Errorf("registry: entry %q spans more than one line", name)
+	}
 	if _, exists := r.Lookup(name); exists {
 		return &DuplicateEntryError{Name: name}
 	}
+	before := append([]string(nil), r.lines...)
 
 	ending := r.defaultEnding()
 
@@ -325,8 +329,30 @@ func (r *Registry) AddEntry(name, path string) error {
 		"path: "+path+ending,
 	)
 	r.parse()
+
+	// Read back what was appended. An entry Apex wrote and cannot then find
+	// is the worst outcome available here — the project exists and nothing
+	// will ever look at it — so a name or path that would not survive the
+	// round trip is refused, and the file left as it was, rather than saved.
+	if got, ok := r.Lookup(name); !ok || got.Path != path {
+		r.lines = before
+		r.parse()
+		return &UnreadableEntryError{Name: name, Path: path}
+	}
 	return nil
 }
+
+// UnreadableEntryError reports an entry AddEntry would have written but could
+// not have read back as the same name and path.
+type UnreadableEntryError struct{ Name, Path string }
+
+func (e *UnreadableEntryError) Error() string {
+	return fmt.Sprintf("an entry named %q at %q would not read back from PROJECTS.md as written\n"+
+		"  choose a plainer name", e.Name, e.Path)
+}
+
+// UserFixable marks an unreadable entry as a name the user chooses again.
+func (e *UnreadableEntryError) UserFixable() bool { return true }
 
 // defaultEnding is the terminator used for inserted lines: whatever the file
 // already uses, so a CRLF registry stays CRLF.
@@ -499,12 +525,31 @@ func parseHeading(text string) (string, bool) {
 	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
 		return "", false
 	}
-	// A trailing run of '#' is the closed-ATX form.
-	name := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(rest), "#"))
-	if name == "" {
+	return headingText(rest)
+}
+
+// headingText strips a heading's closing sequence, the way CommonMark does:
+// a trailing run of '#' is the closed-ATX form only when a space or tab comes
+// before it. "## C#" names C#, and "## C# ##" names it too.
+//
+// This matters because Apex appends to this file. `apex start` writes the
+// heading from an idea's title, and a title ending in '#' that read back as
+// something else would register a project under one name and find it under
+// another — the entry `start` just wrote would not be the one it looked up.
+func headingText(rest string) (string, bool) {
+	text := strings.TrimSpace(rest)
+	if trimmed := strings.TrimRight(text, "#"); trimmed != text {
+		switch {
+		case trimmed == "":
+			text = ""
+		case strings.HasSuffix(trimmed, " ") || strings.HasSuffix(trimmed, "\t"):
+			text = strings.TrimSpace(trimmed)
+		}
+	}
+	if text == "" {
 		return "", false
 	}
-	return name, true
+	return text, true
 }
 
 // parsePathLine matches the `path:` line. The key is matched case-insensitively
