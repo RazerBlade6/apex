@@ -153,6 +153,12 @@ func runStart(ctx context.Context, w io.Writer, rawID string, opts startOptions)
 		return err
 	}
 
+	// Before anything is created: the project has to be registrable under
+	// this name at this path, or it would be made and then never found.
+	if err := checkRegistrable(ctx, sess, name, slug, dir, home); err != nil {
+		return err
+	}
+
 	fmt.Fprintf(w, "%s  %s\n", idea.ID, idea.Title)
 	fmt.Fprintf(w, "creating %s\n\n", dir)
 
@@ -273,17 +279,11 @@ func tierOne(ctx context.Context, w io.Writer, sess *session, dir, name, slug st
 	// exist and where do they live" (DESIGN.md §6), so a project Apex created
 	// and did not register would be invisible to every other command.
 	registryPath := contextfs.RegistryPath(sess.Root)
-	reg, err := contextfs.LoadRegistry(ctx, registryPath)
+	added, err := registerProject(ctx, registryPath, name, dir, mustHome())
 	if err != nil {
 		return err
 	}
-	if _, exists := reg.Lookup(name); !exists {
-		if err := reg.AddEntry(name, tildify(dir, mustHome())); err != nil {
-			return err
-		}
-		if err := reg.Save(ctx); err != nil {
-			return err
-		}
+	if added {
 		fmt.Fprintf(w, "registered in %s\n", registryPath)
 	}
 
@@ -294,7 +294,86 @@ func tierOne(ctx context.Context, w io.Writer, sess *session, dir, name, slug st
 	if _, err := project.Upsert(ctx, sess.Store, candidate, "active", time.Now()); err != nil {
 		return err
 	}
+	fmt.Fprintln(w, "the advisor reads it from PROJECT.md until a sync digests it")
 	return nil
+}
+
+// checkRegistrable refuses a new project that PROJECTS.md or the projects
+// table could not hold under this name at this path, before anything exists
+// on disk.
+//
+// Each refusal is a way the project would be created and then lost. An entry
+// of the same name pointing elsewhere means the append is skipped and the new
+// directory never reaches the registry. A name that slugifies onto another
+// entry's key is a collision sync reports and cannot settle. A row already
+// holding the key at another path — a project removed from PROJECTS.md but
+// never pruned — would be treated as having MOVED here, handing the new
+// project the old one's digest and action items.
+func checkRegistrable(ctx context.Context, sess *session, name, slug, dir, home string) error {
+	reg, err := contextfs.LoadRegistry(ctx, contextfs.RegistryPath(sess.Root))
+	if err != nil {
+		return err
+	}
+	for _, e := range reg.Entries() {
+		c, resolveErr := project.Resolve(e, home)
+		here := resolveErr == nil && c.Path == dir
+		switch {
+		case strings.EqualFold(e.Name, name) && here:
+			// Registered already, exactly as it would be: a start rerun
+			// after a failure part way. tierOne leaves it as it is.
+			continue
+		case strings.EqualFold(e.Name, name) || project.Slug(e.Name) == slug:
+			return &registryConflictError{Name: name, Existing: e.Name, Path: e.Path}
+		case here:
+			return &registryConflictError{Name: name, Existing: e.Name, Path: e.Path}
+		}
+	}
+
+	row, err := sess.Store.GetProject(ctx, slug)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil
+	case err != nil:
+		return err
+	case row.Path != dir:
+		return &registryConflictError{Name: name, Existing: row.Name, Path: row.Path, Unlisted: true}
+	}
+	return nil
+}
+
+// registerProject appends the project to PROJECTS.md unless an entry of that
+// name already points at it, and confirms that the saved file names it.
+//
+// The confirmation is a second read of the file, not of the value in memory.
+// The point of the entry is that every later command finds the project by
+// reading PROJECTS.md, so that is what is checked.
+func registerProject(ctx context.Context, registryPath, name, dir, home string) (bool, error) {
+	reg, err := contextfs.LoadRegistry(ctx, registryPath)
+	if err != nil {
+		return false, err
+	}
+	added := false
+	if _, exists := reg.Lookup(name); !exists {
+		if err := reg.AddEntry(name, tildify(dir, home)); err != nil {
+			return false, err
+		}
+		if err := reg.Save(ctx); err != nil {
+			return false, err
+		}
+		added = true
+	}
+
+	reread, err := contextfs.LoadRegistry(ctx, registryPath)
+	if err != nil {
+		return added, err
+	}
+	if e, ok := reread.Lookup(name); ok {
+		if c, err := project.Resolve(e, home); err == nil && c.Path == dir {
+			return added, nil
+		}
+	}
+	return added, fmt.Errorf("%s does not register %s at %s after writing it; check the file by hand",
+		registryPath, name, dir)
 }
 
 // scaffoldIntent is tier 3's brief.
@@ -531,6 +610,29 @@ func (e *dismissedIdeaError) Error() string {
 }
 
 func (e *dismissedIdeaError) UserFixable() bool { return true }
+
+// registryConflictError refuses a start whose project would collide with one
+// already registered.
+type registryConflictError struct {
+	Name     string
+	Existing string
+	Path     string
+	// Unlisted is set when the collision is with a row in the projects
+	// table that PROJECTS.md no longer lists.
+	Unlisted bool
+}
+
+func (e *registryConflictError) Error() string {
+	if e.Unlisted {
+		return fmt.Sprintf("%q would take the key of %q, a project Apex still has on record at %s\n"+
+			"  it is no longer in PROJECTS.md, but its digest and action items are kept\n"+
+			"  pass --name to choose another name, or re-add that entry", e.Name, e.Existing, e.Path)
+	}
+	return fmt.Sprintf("%q collides with the PROJECTS.md entry %q (path: %s)\n"+
+		"  pass --name to choose another name, or --path to choose another location", e.Name, e.Existing, e.Path)
+}
+
+func (e *registryConflictError) UserFixable() bool { return true }
 
 type badProjectNameError struct{ Name string }
 

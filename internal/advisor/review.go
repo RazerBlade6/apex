@@ -38,10 +38,14 @@ const maxReviewItems = 8
 
 // reviewResponse is the schema's shape.
 type reviewResponse struct {
-	Items []proposedItem `json:"items"`
+	Items []ProposedItem `json:"items"`
 }
 
-type proposedItem struct {
+// ProposedItem is one action item as a model proposed it, before it has been
+// resolved to a project, deduplicated, or given an id. `apex review` gets
+// these from a Structured call; the chat gets them from a reply the user then
+// approves (see ExtractProposals).
+type ProposedItem struct {
 	Project   string `json:"project"`
 	Title     string `json:"title"`
 	Body      string `json:"body"`
@@ -49,7 +53,8 @@ type proposedItem struct {
 	Effort    string `json:"effort"`
 }
 
-// ReviewResult is what one `apex review` produced.
+// ReviewResult is what one `apex review` produced. RecordItems returns the
+// same shape, because recording is the second half of a review.
 type ReviewResult struct {
 	// Inserted are the action items written to the database, in the order
 	// the model proposed them.
@@ -79,10 +84,8 @@ type ReviewResult struct {
 // deduplicate against existing non-dismissed items, insert as proposed with a
 // context hash.
 //
-// Deduplication happens in Go rather than by asking the model nicely. The
-// prompt does list what is already open — which is what stops the model
-// wasting its output on repeats — but a model that ignores the list must not
-// be able to fill the table with duplicates.
+// Deduplication happens in Go rather than by asking the model nicely; see
+// record, which RecordItems shares.
 func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, error) {
 	if len(actx.Digests) == 0 {
 		return nil, ErrNoDigests
@@ -92,7 +95,6 @@ func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, err
 	if err != nil {
 		return nil, err
 	}
-	open := openTitles(existing)
 
 	schema, err := schemaBytes(actionItemsSchema)
 	if err != nil {
@@ -124,16 +126,51 @@ func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, err
 		model = route.Model
 	}
 
-	result := &ReviewResult{ContextHash: actx.Hash(), Usage: usage, Model: model}
+	result, err := a.record(ctx, actx, decoded.Items, model, existing)
+	if err != nil {
+		return nil, err
+	}
+	result.Usage = usage
+	return result, nil
+}
+
+// RecordItems writes proposed action items the way `apex review` does:
+// resolved to a project the context covers, deduplicated against every item
+// not dismissed, and inserted as proposed with the context hash stamped on.
+//
+// It exists for the chat. There the model proposes items inside a reply and
+// the user approves them before anything is written, so the proposal and the
+// write are two events rather than one call — but an item approved in the
+// chat must land exactly as one from a review would, or the Items view would
+// hold two kinds of row with one appearance.
+//
+// model is what generated the proposals, recorded as generated_by.
+func (a *Advisor) RecordItems(ctx context.Context, actx *Context, items []ProposedItem, model string) (*ReviewResult, error) {
+	existing, err := a.Store.ListActionItems(ctx, store.ActionItemFilter{})
+	if err != nil {
+		return nil, err
+	}
+	return a.record(ctx, actx, items, model, existing)
+}
+
+// record is the shared half of Review and RecordItems.
+//
+// Deduplication happens here rather than by asking the model nicely. Both
+// prompts do list what is already open — which is what stops the model
+// wasting its output on repeats — but a model that ignores the list must not
+// be able to fill the table with duplicates.
+func (a *Advisor) record(ctx context.Context, actx *Context, items []ProposedItem, model string, existing []store.ActionItem) (*ReviewResult, error) {
+	open := openTitles(existing)
+	result := &ReviewResult{ContextHash: actx.Hash(), Model: model}
 	now := a.now()
 	seen := map[string]bool{}
 
-	for _, item := range decoded.Items {
+	for _, item := range items {
 		title := strings.TrimSpace(item.Title)
 		if title == "" {
 			continue
 		}
-		slug, ok := resolveProject(actx, item.Project)
+		slug, ok := actx.ResolveProject(item.Project)
 		if !ok {
 			result.UnknownProjects = append(result.UnknownProjects, item.Project)
 			continue
@@ -222,7 +259,7 @@ func renderOpenItems(items []store.ActionItem) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// resolveProject maps whatever the model wrote into a slug that exists in the
+// ResolveProject maps whatever the model wrote into a slug that exists in the
 // context it was given.
 //
 // The schema asks for the slug and the prompt shows it, so the exact match is
@@ -231,20 +268,27 @@ func renderOpenItems(items []store.ActionItem) string {
 // would. Anything else is reported to the user, never attached to the nearest
 // project: an action item on the wrong project is worse than one that did not
 // land.
-func resolveProject(actx *Context, want string) (string, bool) {
+//
+// A project that has no digest yet is covered too. It is in the prompt, from
+// its PROJECT.md, and a project `apex start` has just created is exactly the
+// one the user is most likely to want work on next.
+func (c *Context) ResolveProject(want string) (string, bool) {
 	want = strings.TrimSpace(want)
 	if want == "" {
 		return "", false
 	}
 	covered := map[string]bool{}
-	for _, d := range actx.Digests {
+	for _, d := range c.Digests {
 		covered[d.ProjectSlug] = true
+	}
+	for _, u := range c.Undigested {
+		covered[u.Project.Slug] = true
 	}
 	if covered[want] {
 		return want, true
 	}
 	for slug := range covered {
-		p, ok := actx.Projects[slug]
+		p, ok := c.Projects[slug]
 		if ok && strings.EqualFold(p.Name, want) {
 			return slug, true
 		}

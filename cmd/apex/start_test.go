@@ -284,3 +284,96 @@ func mustLookPath(t *testing.T, name string) string {
 	}
 	return path
 }
+
+// TestAStartedProjectIsRecognisedBeforeItsFirstSync: `apex start` registers a
+// project and stops short of generating a digest, so until the user runs sync
+// the only record of it is its PROJECTS.md entry, its row and its PROJECT.md.
+// That has to be enough for the advisor: an item proposed for it must land on
+// it, not be skipped as a project nobody has heard of.
+func TestAStartedProjectIsRecognisedBeforeItsFirstSync(t *testing.T) {
+	f := newFixture(t)
+	idea := seedIdea(t, f, "A TUI over git worktrees.")
+	installFakeExecutor(t, &fakeExecutor{})
+	if out, err := run(t, "start", idea.ID, "--no-dispatch"); err != nil {
+		t.Fatalf("start: %v\n%s", err, out)
+	}
+
+	f.fake.JSON = `{"items":[
+		{"project":"worktree-switcher","title":"List the worktrees","body":"b","rationale":"r","effort":"small"}
+	]}`
+	out, err := run(t, "review")
+	if err != nil {
+		t.Fatalf("review: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "not in the portfolio") {
+		t.Fatalf("the project start just created was not recognised:\n%s", out)
+	}
+	var found bool
+	for _, item := range listItems(t) {
+		if item.ProjectSlug == "worktree-switcher" && item.Title == "List the worktrees" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no item was recorded against the started project:\n%s", out)
+	}
+
+	// And the next sync picks it up from the entry start appended.
+	if out, err := run(t, "sync"); err != nil {
+		t.Fatalf("sync after start: %v\n%s", err, out)
+	} else if !strings.Contains(out, "Worktree Switcher") {
+		t.Errorf("sync did not find the started project in PROJECTS.md:\n%s", out)
+	}
+}
+
+// TestStartRefusesANameThatIsAlreadyRegisteredElsewhere: an entry of the same
+// name pointing somewhere else would mean the append is skipped and the new
+// project is never registered. It is refused before anything is created.
+func TestStartRefusesANameThatIsAlreadyRegisteredElsewhere(t *testing.T) {
+	f := newFixture(t)
+	idea := seedIdea(t, f, "A TUI over git worktrees.")
+	f.writeRegistry(t, f.readRegistry(t)+"\n## Worktree Switcher\npath: ~/Elsewhere/switcher\n")
+
+	out, err := run(t, "start", idea.ID, "--no-dispatch")
+	if err == nil {
+		t.Fatalf("start registered a project over an existing entry:\n%s", out)
+	}
+	assertUserFixable(t, err)
+	if !strings.Contains(err.Error(), "--name") {
+		t.Errorf("the refusal does not say how to fix it: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(f.home, "Development", "Worktree Switcher")); statErr == nil {
+		t.Error("the directory was created before the conflict was found")
+	}
+
+	// --name is the way out, and it registers under the name given.
+	if out, err := run(t, "start", idea.ID, "--no-dispatch", "--name", "Switcher"); err != nil {
+		t.Fatalf("start --name: %v\n%s", err, out)
+	}
+	if registry := f.readRegistry(t); !strings.Contains(registry, "## Switcher\npath: ~/Development/Switcher") {
+		t.Errorf("start --name did not register under the new name:\n%s", registry)
+	}
+}
+
+// TestStartRefusesToInheritAnUnlistedProject: a row still holding the slug at
+// another path — a project taken out of PROJECTS.md but never pruned — would
+// otherwise be treated as having moved into the new directory, and the new
+// project would inherit its digest and its action items.
+func TestStartRefusesToInheritAnUnlistedProject(t *testing.T) {
+	f := newFixture(t)
+	idea := seedIdea(t, f, "A TUI over git worktrees.")
+
+	st, closeStore := openFixtureStore(t)
+	if err := st.UpsertProject(context.Background(), store.Project{
+		Slug: "worktree-switcher", Name: "Worktree Switcher", Path: "/somewhere/else", Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeStore()
+
+	out, err := run(t, "start", idea.ID, "--no-dispatch")
+	if err == nil {
+		t.Fatalf("start adopted an unlisted project's row:\n%s", out)
+	}
+	assertUserFixable(t, err)
+}

@@ -99,7 +99,7 @@ target. See [known limitations](#status-and-known-limitations).
 ### Run the tests
 
 ```sh
-go test ./...              # 238 tests, entirely offline — no API calls, no cost
+go test ./...              # 262 tests, entirely offline — no API calls, no cost
 go test -race ./...        # concurrency checks
 ```
 
@@ -184,7 +184,11 @@ a one-line crontab entry.
 interface with three views on `tab`:
 
 - **Chat** — your prompts and the input field on the left, Apex's replies on the right,
-  streamed and rendered as markdown
+  streamed and rendered as markdown. When a conversation lands on concrete work, Apex
+  proposes action items as a checklist under its reply; `y` adds the ticked ones to
+  Items, ready to dispatch, and `n` discards them. Nothing is recorded until you answer.
+  `/items` turns the conversation so far into proposals on demand, and `/reload` picks
+  up projects started or synced in another terminal
 - **Items** — action items as cards grouped by project, with the selected item's project on
   the left and its full detail on the right; filtered with `f`, dispatched with `enter`
 - **Projects** — the registry with digest previews and staleness indicators
@@ -320,7 +324,9 @@ Apex reads two kinds of file, in two places.
 - **`PROFILE.md`** — who you are, how you work, what makes a project die for you
 - **`SKILLS.md`** — what you know, what you're learning
 - **`PROJECTS.md`** — the registry: a name and a path per project, with Apex-generated
-  summary lines beneath
+  summary lines beneath. `apex start` appends an entry for each project it creates, and
+  until the next `apex sync` the advisor reads that project from its `PROJECT.md`, so a
+  project Apex just made is one it already knows about
 
 ### `<project>/PROJECT.md`
 

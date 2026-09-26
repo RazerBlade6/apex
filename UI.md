@@ -121,6 +121,26 @@ sentence wraps onto two of the three input rows in a narrow left pane, each
 carrying its own prompt glyph, which reads as three empty inputs rather than
 one.
 
+**Proposed action items are a checklist.** When a reply proposes action items,
+or `/items` asks for them, they are drawn in Apex's pane under the reply as a
+checklist: a pointer, a box, the title, and beneath it the project and effort —
+or, for an item naming no project in the portfolio, an orange line saying it will
+not be added, with a `[-]` box that cannot be ticked. It is plain styled text
+rather than markdown, because its state changes on every key and Glamour would
+restyle it out from under the pointer; it is indented to Glamour's margin like the
+system notes, and every line is wrapped and truncated to the pane (§3's width rule
+applies to it exactly as it does to a card). While it is open the input is blurred
+and the checklist has the keyboard: `↑↓` move, space ticks, `y` adds what is
+ticked, `n` or `esc` discards. `enter` does not accept it — it is the send key,
+and a user who typed without noticing the checklist should be reminded, not have
+their enter taken as a yes. Any other key is swallowed with that reminder on the
+status line. Once answered, the checklist stays in the scrollback as a record,
+with the pointer gone and each item's id — or why it was not added — in place of
+the question.
+
+A reply's proposal block is JSON while it streams, so it is never shown: the
+partial is cut at the fence and a dim "drafting action items…" stands in for it.
+
 ## 3. The items view is three boxes
 
 An action item is not a line of text. It belongs to a project whose state is
@@ -297,6 +317,9 @@ change pass:
   until something is selected, that no git read starts before then, that `esc`
   empties them again, that a reload keeps the selection by id, and that an empty
   database still gets three boxes with the reason in the middle one.
+- **`TestProposalChecklistFitsTheFrame`** is `TestFrameFitsTheTerminal` for
+  the checklist, at the same five sizes, open and answered, with a title and an
+  unknown project name longer than any pane.
 - **`TestGlamourStyleIsResolvedBeforeTheProgramStarts`** counts style lookups
   and fails if a resize causes a second one, which is the only way to catch §5
   from inside a test.
