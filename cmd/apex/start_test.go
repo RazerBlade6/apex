@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/RazerBlade6/apex/internal/advisor"
 	"github.com/RazerBlade6/apex/internal/contextfs"
 	"github.com/RazerBlade6/apex/internal/store"
 )
@@ -376,4 +378,56 @@ func TestStartRefusesToInheritAnUnlistedProject(t *testing.T) {
 		t.Fatalf("start adopted an unlisted project's row:\n%s", out)
 	}
 	assertUserFixable(t, err)
+}
+
+// TestChatIdeaStarterCreatesAProjectAndItsItem: what the chat's final "yes"
+// does. The idea is recorded and started, the project exists and is in
+// PROJECTS.md, and its first action item is on it, accepted and ready to
+// dispatch.
+func TestChatIdeaStarterCreatesAProjectAndItsItem(t *testing.T) {
+	f := newFixture(t)
+	seedReviewableProject(t, f)
+	ctx := context.Background()
+	sess, err := openSession(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	plan := &advisor.IdeaPlan{
+		Name: "Paper Shelf", Pitch: "A terminal reading queue.", Rationale: "r", Stack: "cobol",
+		Item: advisor.ProposedItem{Title: "Build the queue command", Body: "Add, list, pop.", Effort: "small"},
+	}
+	started, err := ideaStarterFor(sess)(ctx, io.Discard, plan)
+	if err != nil {
+		t.Fatalf("starter: %v", err)
+	}
+
+	dir := filepath.Join(f.home, "Development", "Paper Shelf")
+	if started.Dir != dir {
+		t.Errorf("dir = %q, want %q", started.Dir, dir)
+	}
+	if _, err := os.Stat(contextfs.ProjectDocPath(dir)); err != nil {
+		t.Errorf("no PROJECT.md: %v", err)
+	}
+	if reg := f.readRegistry(t); !strings.Contains(reg, "## Paper Shelf\npath: ~/Development/Paper Shelf") {
+		t.Errorf("not registered in PROJECTS.md:\n%s", reg)
+	}
+	it := started.Item
+	if it.ProjectSlug != "paper-shelf" || it.Status != store.ItemAccepted || it.Title != "Build the queue command" {
+		t.Errorf("item = %+v", it)
+	}
+	ideas, err := sess.Store.ListIdeas(ctx, "")
+	if err != nil || len(ideas) != 1 || ideas[0].Status != store.IdeaStarted || ideas[0].StartedProjectSlug != "paper-shelf" {
+		t.Errorf("ideas = %+v, %v; want one, started as paper-shelf", ideas, err)
+	}
+
+	// A second project wanting the same directory is refused before anything
+	// is written: no second idea left behind.
+	if _, err := ideaStarterFor(sess)(ctx, io.Discard, plan); err == nil {
+		t.Fatal("a second project was created over the first")
+	}
+	if ideas, _ := sess.Store.ListIdeas(ctx, ""); len(ideas) != 1 {
+		t.Errorf("a refused start still recorded an idea: %d ideas", len(ideas))
+	}
 }

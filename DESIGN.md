@@ -1323,6 +1323,25 @@ what is displayed, and kept in the history so the next turn knows what it
 proposed. The chat prompt lists the open items on every turn, because an item
 approved three turns ago is one the model must not propose again.
 
+**The chat turns a project idea into a project.** `apex ideas` records every idea
+and leaves the user to `apex start` one; the chat is where the choosing happens, so
+it records nothing until the choice is made. Ideas arrive in an `apex-ideas` block
+(or from `/ideas`) as a list to pick from. Picking one asks for it in depth plus a
+short questionnaire, answered one question at a time in the ordinary input; then
+one question of Apex's own — make it an action item? Yes plans the project from
+the answers (name, pitch, stack, first item) and hands the plan to an `IdeaStarter`
+callback in `cmd/apex`, which records the idea and runs `createProject`: `apex
+start` short of the agent. The first action item is then added to the new project,
+`accepted`, because the user has already said yes to it — and dispatching it is
+the agent pass `apex start` would have run.
+
+The project is created at the yes rather than at dispatch because an action item
+belongs to a registered project; an item pointing at a directory that does not
+exist yet would be the one row that could not be dispatched, synced or shown with
+its project. Every refusal `apex start` can make — an occupied directory, a
+registry conflict — is checked before the idea is recorded, and a failure keeps
+the answers so `y` can try again.
+
 **`enter` asks before it dispatches.** This is an addition to the line above, and
 it is deliberate: a dispatch takes an exclusive lock, spends subscription quota
 from the same window as the user's own sessions, and lets an agent edit a real

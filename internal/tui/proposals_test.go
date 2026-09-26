@@ -18,11 +18,15 @@ import (
 // chatFake answers the chat from memory: Text for a streamed reply, JSON for
 // the Structured call behind `/items`.
 type chatFake struct {
-	mu         sync.Mutex
-	Text       string
-	JSON       string
+	mu   sync.Mutex
+	Text string
+	JSON string
+	// Queue, when not empty, answers Structured calls in order before JSON
+	// does, for a flow that makes several.
+	Queue      []string
 	streams    int
 	structured int
+	requests   []provider.Request
 }
 
 func (f *chatFake) Name() string { return "fake" }
@@ -42,7 +46,11 @@ func (f *chatFake) Stream(ctx context.Context, req provider.Request) (<-chan pro
 func (f *chatFake) Structured(ctx context.Context, req provider.Request, schema json.RawMessage, out any) (provider.Usage, error) {
 	f.mu.Lock()
 	f.structured++
+	f.requests = append(f.requests, req)
 	body := f.JSON
+	if len(f.Queue) > 0 {
+		body, f.Queue = f.Queue[0], f.Queue[1:]
+	}
 	f.mu.Unlock()
 	return provider.Usage{Model: "fake-model"}, json.Unmarshal([]byte(body), out)
 }
@@ -77,7 +85,8 @@ func pump(t *testing.T, m *Model, cmd tea.Cmd) {
 			pump(t, m, c)
 		}
 	case streamEventMsg, recordedMsg, proposalsMsg, contextReloadedMsg, contextLoadedMsg,
-		itemsLoadedMsg, projectsLoadedMsg, observedMsg:
+		itemsLoadedMsg, projectsLoadedMsg, observedMsg,
+		ideasProposedMsg, ideaExploredMsg, ideaCreatedMsg:
 		_, next := m.Update(msg)
 		pump(t, m, next)
 	}
