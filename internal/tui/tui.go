@@ -59,6 +59,9 @@ type Options struct {
 	// Dispatch runs an action item. Nil disables dispatch and the items
 	// view says so rather than pretending.
 	Dispatch Dispatcher
+	// StartIdea creates the project a chosen idea became, and its first
+	// action item. Nil disables that last step and the chat says so.
+	StartIdea IdeaStarter
 	// Version is shown in the header.
 	Version string
 
@@ -215,7 +218,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// chat was focused and were dropped — leaving both views reading
 	// "loading…" forever with no error anywhere. The same applies to a stream
 	// or a dispatch the user tabbed away from mid-flight.
-	case contextLoadedMsg, streamEventMsg, observedMsg, proposalsMsg, recordedMsg, contextReloadedMsg:
+	case contextLoadedMsg, streamEventMsg, observedMsg, proposalsMsg, recordedMsg, contextReloadedMsg,
+		ideasProposedMsg, ideaExploredMsg, ideaCreatedMsg:
 		return m.updateChat(msg)
 	case itemsLoadedMsg, dispatchLineMsg, dispatchDoneMsg, gitStateMsg:
 		return m.updateItems(msg)
@@ -252,6 +256,9 @@ func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) quit() tea.Cmd {
 	m.cancelStream()
 	m.cancelProposing()
+	if f := m.chat.idea; f != nil && f.run != nil {
+		f.run.cancel()
+	}
 	m.cancelDispatch()
 	return tea.Quit
 }
@@ -259,13 +266,9 @@ func (m *Model) quit() tea.Cmd {
 func (m *Model) setView(v view) {
 	m.view = view((int(v) + len(views)) % len(views))
 	m.layout()
-	// The input stays blurred under an open checklist, which has the
-	// keyboard until it is answered.
-	if m.view == viewChat && m.chat.proposal == nil {
-		m.chat.ta.Focus()
-		return
-	}
-	m.chat.ta.Blur()
+	// The input stays blurred under an open checklist or list, which has
+	// the keyboard until it is answered.
+	m.focusInput()
 }
 
 func (m *Model) setStatus(text string, kind statusKind) {
@@ -408,8 +411,11 @@ func (m *Model) footer() string {
 	switch m.view {
 	case viewChat:
 		keys = "tab views · enter send · esc stop · ctrl+c quit"
-		if m.chat.proposal != nil {
+		switch {
+		case m.chat.proposal != nil:
 			keys = "tab views · ↑↓ move · space tick · y add · n discard · ctrl+c quit"
+		case m.chat.idea != nil:
+			keys = m.ideaFooter()
 		}
 	case viewItems:
 		keys = "tab views · ↑↓ move · f filter · enter dispatch · r reload · ctrl+c quit"

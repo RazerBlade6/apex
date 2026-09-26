@@ -141,6 +141,15 @@ the question.
 A reply's proposal block is JSON while it streams, so it is never shown: the
 partial is cut at the fence and a dim "drafting action items…" stands in for it.
 
+**Project ideas are a list to pick from**, drawn the same way: a number, the
+title, and two dim lines of the pitch — enough to choose between them — with
+`↑↓` and `enter`, or the number, to pick and `n` for none. The pick is marked
+green and the rest dimmed. The questionnaire that follows is not modal: each
+question is a yellow line in Apex's pane and the answer is typed in the input as
+usual, an empty answer skipping it. The last question, whether to make the idea
+an action item, takes the keyboard back for `y` or `n`, for the same reason the
+checklist does.
+
 ## 3. The items view is three boxes
 
 An action item is not a line of text. It belongs to a project whose state is
@@ -320,6 +329,9 @@ change pass:
 - **`TestProposalChecklistFitsTheFrame`** is `TestFrameFitsTheTerminal` for
   the checklist, at the same five sizes, open and answered, with a title and an
   unknown project name longer than any pane.
+- **`TestIdeaListFitsTheFrame`** does the same for the list of ideas, and
+  checks that tabbing away and back does not hand the input its focus under an
+  open list.
 - **`TestGlamourStyleIsResolvedBeforeTheProgramStarts`** counts style lookups
   and fails if a resize causes a second one, which is the only way to catch §5
   from inside a test.

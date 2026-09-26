@@ -46,12 +46,19 @@ const (
 	// roleProposal is a checklist of proposed action items (proposals.go).
 	// Its body is drawn from prop, not from body.
 	roleProposal = "apex ☐"
+	// roleIdeas is a list of project ideas to pick from (ideas.go), drawn
+	// from ideas.
+	roleIdeas = "apex ✦"
+	// roleQuestion is a question Apex needs answered: the questionnaire,
+	// and whether to make an idea an action item.
+	roleQuestion = "apex ?"
 )
 
 type chatTurn struct {
-	role string
-	body string
-	prop *proposal
+	role  string
+	body  string
+	prop  *proposal
+	ideas *ideaFlow
 	// rendered is the Glamour output, cached because re-rendering the whole
 	// scrollback on every delta is the obvious way to make this view slow.
 	rendered string
@@ -83,6 +90,9 @@ type chatState struct {
 	proposal *proposal
 	// proposing is the `/items` call in flight; nil when there is none.
 	proposing *proposeRun
+	// idea is the project-ideas flow, from a list to an action item; nil
+	// when there is none.
+	idea *ideaFlow
 }
 
 // streamHandle owns one in-flight provider stream.
@@ -277,22 +287,37 @@ func (m *Model) rerenderChat() {
 		// A proposal block is JSON until the reply ends and it becomes a
 		// checklist; while it streams, it is summarised in one dim line.
 		text, drafting := advisor.VisibleReply(m.chat.pending.String())
+		note := "drafting " + drafting + "…"
 		switch {
-		case strings.TrimSpace(text) == "" && drafting:
-			partial.WriteString(styleDim.Render(indentBlock("drafting action items…", glamourMargin)))
+		case strings.TrimSpace(text) == "" && drafting != "":
+			partial.WriteString(styleDim.Render(indentBlock(note, glamourMargin)))
 		case strings.TrimSpace(text) == "":
 			partial.WriteString(styleDim.Render(indentBlock("thinking…", glamourMargin)))
 		default:
 			partial.WriteString(indentBlock(
 				wrapPlain(strings.TrimSpace(text), m.replyWidth()-glamourMargin), glamourMargin))
-			if drafting {
-				partial.WriteString("\n\n" + styleDim.Render(indentBlock("drafting action items…", glamourMargin)))
+			if drafting != "" {
+				partial.WriteString("\n\n" + styleDim.Render(indentBlock(note, glamourMargin)))
 			}
 		}
 		block(&out, partial.String())
 	}
 	if m.chat.proposing != nil {
 		block(&out, styleDim.Render(indentBlock("turning the conversation into action items…", glamourMargin)))
+	}
+	if f := m.chat.idea; f != nil {
+		var working string
+		switch {
+		case f.stage == ideaExploring && len(f.ideas) == 0:
+			working = "thinking of project ideas…"
+		case f.stage == ideaExploring:
+			working = "looking into it…"
+		case f.stage == ideaCreating:
+			working = "writing it up and creating the project…"
+		}
+		if working != "" {
+			block(&out, styleDim.Render(indentBlock(working, glamourMargin)))
+		}
 	}
 
 	m.chat.inVP.SetContent(in.String())
@@ -330,6 +355,13 @@ func (m *Model) renderTurn(t chatTurn) string {
 		return head + "\n" + body
 	case roleProposal:
 		return m.renderProposal(t.prop)
+	case roleIdeas:
+		return m.renderIdeas(t.ideas)
+	case roleQuestion:
+		if two {
+			return indentBlock(fitStyled(t.body, m.replyWidth()-glamourMargin, styleLabel), glamourMargin)
+		}
+		return fitStyled(t.body, m.replyWidth(), styleLabel)
 	case roleSystem:
 		if two {
 			// Indented to Glamour's margin so the right pane has one left
@@ -356,6 +388,9 @@ func (m *Model) chatHint() string {
 	}
 	if m.chat.proposing != nil {
 		return "proposing action items — esc to stop"
+	}
+	if m.chat.idea != nil {
+		return m.ideaHint()
 	}
 	if p := m.chat.proposal; p != nil {
 		return fmt.Sprintf("%d proposed action item(s) · y add ticked · n discard", len(p.items))
@@ -443,6 +478,15 @@ func (m *Model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case contextReloadedMsg:
 		return m.contextReloaded(msg)
 
+	case ideasProposedMsg:
+		return m.ideasProposed(msg)
+
+	case ideaExploredMsg:
+		return m.explored(msg)
+
+	case ideaCreatedMsg:
+		return m.created(msg)
+
 	case observedMsg:
 		m.chat.observing = false
 		if msg.err != nil {
@@ -459,8 +503,17 @@ func (m *Model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.chat.proposal != nil {
 			return m.proposalKey(msg)
 		}
+		if m.chat.idea != nil && m.chat.idea.stage != ideaAsking {
+			return m.ideaKey(msg)
+		}
 		switch msg.String() {
 		case "esc":
+			if m.chat.idea != nil {
+				m.chat.say(roleSystem, "Stopped the questionnaire; nothing was recorded.")
+				m.endIdeas()
+				m.setStatus("stopped", statusWarn)
+				return m, nil
+			}
 			if m.chat.stream != nil {
 				m.cancelStream()
 				m.setStatus("stopped", statusWarn)
@@ -537,6 +590,12 @@ func (m *Model) send() tea.Cmd {
 		return nil
 	}
 	input := strings.TrimSpace(m.chat.ta.Value())
+	// The questionnaire takes whatever is typed as an answer, an empty one
+	// included: that is a question skipped.
+	if f := m.chat.idea; f != nil && f.stage == ideaAsking {
+		m.chat.ta.Reset()
+		return m.answerIdea(input)
+	}
 	if input == "" {
 		return nil
 	}
@@ -565,7 +624,8 @@ func (m *Model) send() tea.Cmd {
 }
 
 // chatCommands is what `/help` lists.
-const chatCommands = `/items   turn this conversation into action items to approve
+const chatCommands = `/ideas   suggest new projects to pick from and turn into an action item
+/items   turn this conversation into action items to approve
 /reload  re-read your profile, digests and PROJECTS.md — after an apex start or sync elsewhere
 /help    this list`
 
@@ -581,6 +641,10 @@ func (m *Model) chatCommand(input string) tea.Cmd {
 			return nil
 		}
 		cmd := m.proposeCmd()
+		m.rerenderChat()
+		return cmd
+	case "/ideas":
+		cmd := m.ideasCmd()
 		m.rerenderChat()
 		return cmd
 	case "/reload":
@@ -646,7 +710,8 @@ func (m *Model) finishStream() tea.Cmd {
 	// The reply as the user reads it has its proposal block taken out; the
 	// transcript and the history keep the whole of it, so the model can see
 	// on the next turn what it proposed.
-	reply, proposals, proposalErr := advisor.ExtractProposals(full)
+	parsed := advisor.ParseReply(full)
+	reply := parsed.Prose
 
 	if h.failed != nil {
 		m.chat.say(roleSystem, "the model call failed: "+h.failed.Error())
@@ -669,15 +734,20 @@ func (m *Model) finishStream() tea.Cmd {
 		m.setStatus(describeUsage(h.usage), statusNeutral)
 	}
 	switch {
-	case proposalErr != nil:
-		m.chat.say(roleSystem, "could not read the proposed action items: "+proposalErr.Error()+
+	case parsed.ItemsErr != nil:
+		m.chat.say(roleSystem, "could not read the proposed action items: "+parsed.ItemsErr.Error()+
 			" — /items asks for them again")
-	case len(proposals) > 0:
+	case len(parsed.Items) > 0:
 		model := h.usage.Model
 		if model == "" {
 			model = m.opts.Config.Models.Chat.Model
 		}
-		m.openProposal(proposals, model)
+		m.openProposal(parsed.Items, model)
+	case parsed.IdeasErr != nil:
+		m.chat.say(roleSystem, "could not read the proposed ideas: "+parsed.IdeasErr.Error()+
+			" — /ideas asks for them again")
+	case len(parsed.Ideas) > 0:
+		m.openIdeas(parsed.Ideas)
 	}
 	m.rerenderChat()
 

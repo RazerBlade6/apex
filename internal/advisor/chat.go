@@ -66,7 +66,25 @@ to their list — end your reply with exactly one fenced block tagged
 - Never propose an item that is already on the list below.
 - Nothing is recorded until the user approves. They see the block as a
   checklist rather than as JSON, so do not repeat its contents in prose: a
-  sentence introducing the items is enough.`
+  sentence introducing the items is enough.
+
+When the user asks for new project ideas — projects that do not exist yet,
+not work on the ones above — end your reply with exactly one fenced block
+tagged ` + "`" + IdeaFence + "`" + ` instead:
+
+` + "```" + IdeaFence + `
+{"ideas": [{"title": "...", "pitch": "...", "rationale": "..."}]}
+` + "```" + `
+
+- At most five, strongest fit first. "title" is a short project name; "pitch"
+  says what it is and ends with a concrete first milestone; "rationale" argues
+  from this user specifically — their skills, their projects, the gaps between.
+- The user sees the ideas as a list to pick from, so keep your prose to a
+  sentence or two. When they pick one, Apex asks you for more detail and a few
+  questions, and then turns it into a project and its first action item. Do
+  not tell them to run apex start.
+- Never propose an idea already on their backlog, and never an existing
+  project.`
 
 // ProposalFence is the info string of the fenced block a chat reply carries
 // its proposed action items in. It is a fence rather than a Structured call
@@ -205,11 +223,18 @@ func (c *Chat) prompt(ctx context.Context, instruction string) (provider.Prompt,
 	if err != nil {
 		return provider.Prompt{}, err
 	}
+	ideas, err := c.a.Store.ListIdeas(ctx, "")
+	if err != nil {
+		return provider.Prompt{}, err
+	}
 	prompt := c.actx.Prompt(instruction)
 	prompt.Identity = append([]provider.Section{{Title: "Who you are", Body: chatInstructions}}, prompt.Identity...)
 	prompt.Digests = append(prompt.Digests, provider.Section{
 		Title: "Action items already on the list",
 		Body:  renderOpenItems(existing),
+	}, provider.Section{
+		Title: "Project ideas already on the backlog",
+		Body:  renderOpenIdeas(ideas),
 	})
 	return prompt, nil
 }
@@ -233,109 +258,150 @@ func (c *Chat) ProposeItems(ctx context.Context) (*Proposals, error) {
 	if len(c.History) == 0 {
 		return nil, fmt.Errorf("advisor: there is no conversation to turn into action items yet")
 	}
-	schema, err := schemaBytes(actionItemsSchema)
-	if err != nil {
-		return nil, err
-	}
-	route := c.a.Config.Models.Chat
-	p, err := c.a.providerFor(ctx, route)
-	if err != nil {
-		return nil, err
-	}
-	prompt, err := c.prompt(ctx, fmt.Sprintf(proposeInstructions, maxChatProposals))
-	if err != nil {
-		return nil, err
-	}
-	prompt.History = c.window()
-	req := prompt.Build(route.Model, route.Effort, listMaxTokens)
-
 	var decoded reviewResponse
-	usage, err := p.Structured(ctx, req, schema, &decoded)
+	usage, model, err := c.structured(ctx, fmt.Sprintf(proposeInstructions, maxChatProposals), actionItemsSchema, &decoded)
 	if err != nil {
 		return nil, err
-	}
-	model := usage.Model
-	if model == "" {
-		model = route.Model
 	}
 	return &Proposals{Items: capProposals(decoded.Items), Usage: usage, Model: model}, nil
 }
 
 // ExtractProposals splits a chat reply into the prose the user reads and the
-// action items proposed in its fenced block.
-//
-// The last block wins, and only a closed one counts: a reply cut off inside
-// its block has proposed nothing the user could approve with confidence, so
-// it is reported as an error rather than half-parsed. The prose is returned
-// either way, with every proposal block removed, so the JSON is never what
-// the user reads.
-//
-// The block holds {"items": [...]}, and a bare array is accepted too, because
-// a model asked for one shape sometimes writes the shorter.
+// action items proposed in its fenced block. See ParseReply, which it wraps.
 func ExtractProposals(reply string) (prose string, items []ProposedItem, err error) {
-	lines := strings.Split(reply, "\n")
-	var kept []string
-	var block []string
-	inBlock, found, closed := false, false, false
-	for _, line := range lines {
+	r := ParseReply(reply)
+	return r.Prose, r.Items, r.ItemsErr
+}
+
+// Reply is a finished chat reply taken apart: the prose the user reads, and
+// whatever it proposed in fenced blocks.
+type Reply struct {
+	Prose string
+	// Items are proposed action items, from an apex-items block.
+	Items    []ProposedItem
+	ItemsErr error
+	// Ideas are proposed new projects, from an apex-ideas block.
+	Ideas    []ProposedIdea
+	IdeasErr error
+}
+
+// ParseReply splits a reply into prose and proposals.
+//
+// For each kind of block the last one wins, and only a closed one counts: a
+// reply cut off inside its block has proposed nothing the user could act on
+// with confidence, so it is reported as an error rather than half-parsed. The
+// prose is returned either way, with every proposal block removed, so the JSON
+// is never what the user reads.
+//
+// A block holds {"items": [...]} or {"ideas": [...]}, and a bare array is
+// accepted too, because a model asked for one shape sometimes writes the
+// shorter.
+func ParseReply(reply string) Reply {
+	prose, blocks := splitFences(reply, ProposalFence, IdeaFence)
+	out := Reply{Prose: prose}
+
+	if b, ok := blocks[ProposalFence]; ok {
+		var wrapped reviewResponse
+		out.ItemsErr = decodeBlock(b, &wrapped, &wrapped.Items, "proposed action items")
+		out.Items = capProposals(wrapped.Items)
+	}
+	if b, ok := blocks[IdeaFence]; ok {
+		var wrapped ideasResponse
+		out.IdeasErr = decodeBlock(b, &wrapped, &wrapped.Ideas, "proposed project ideas")
+		out.Ideas = capIdeas(wrapped.Ideas)
+	}
+	return out
+}
+
+// fenceBlock is one proposal block's raw body, and whether it was closed.
+type fenceBlock struct {
+	raw    string
+	closed bool
+}
+
+// splitFences removes every block tagged with one of tags from reply,
+// returning the rest as prose and the last block of each tag.
+func splitFences(reply string, tags ...string) (string, map[string]fenceBlock) {
+	blocks := map[string]fenceBlock{}
+	var kept, body []string
+	open := ""
+	for _, line := range strings.Split(reply, "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
-		case !inBlock && isProposalFence(trimmed):
-			inBlock, found, closed = true, true, false
-			block = block[:0]
-		case inBlock && strings.HasPrefix(trimmed, "```"):
-			inBlock, closed = false, true
-		case inBlock:
-			block = append(block, line)
-		default:
+		case open == "":
+			if tag := fenceTag(trimmed, tags); tag != "" {
+				open, body = tag, nil
+				blocks[tag] = fenceBlock{}
+				continue
+			}
 			kept = append(kept, line)
+		case strings.HasPrefix(trimmed, "```"):
+			blocks[open] = fenceBlock{raw: strings.TrimSpace(strings.Join(body, "\n")), closed: true}
+			open = ""
+		default:
+			body = append(body, line)
 		}
 	}
-	prose = strings.TrimSpace(strings.Join(kept, "\n"))
-	if !found {
-		return prose, nil, nil
-	}
-	if !closed {
-		return prose, nil, fmt.Errorf("the proposed action items were cut off before the block closed")
-	}
+	return strings.TrimSpace(strings.Join(kept, "\n")), blocks
+}
 
-	raw := strings.TrimSpace(strings.Join(block, "\n"))
-	var wrapped reviewResponse
-	if err := json.Unmarshal([]byte(raw), &wrapped); err != nil {
-		var bare []ProposedItem
-		if bareErr := json.Unmarshal([]byte(raw), &bare); bareErr != nil {
-			return prose, nil, fmt.Errorf("the proposed action items are not valid JSON: %w", err)
-		}
-		wrapped.Items = bare
+// decodeBlock unmarshals a block into its wrapped shape, falling back to a
+// bare array.
+func decodeBlock[T any](b fenceBlock, wrapped any, list *[]T, what string) error {
+	if !b.closed {
+		return fmt.Errorf("the %s were cut off before the block closed", what)
 	}
-	return prose, capProposals(wrapped.Items), nil
+	err := json.Unmarshal([]byte(b.raw), wrapped)
+	if err == nil {
+		return nil
+	}
+	var bare []T
+	if json.Unmarshal([]byte(b.raw), &bare) != nil {
+		return fmt.Errorf("the %s are not valid JSON: %w", what, err)
+	}
+	*list = bare
+	return nil
 }
 
 // VisibleReply is the part of a reply still arriving that the user should
-// see: everything before a proposal block has opened. drafting reports that
-// one has, so the caller can say that something is being written without
-// showing JSON as it streams.
+// see: everything before a proposal block has opened. drafting names what the
+// block holds once one has — "action items" or "project ideas" — so the caller
+// can say that something is being written without showing JSON as it streams.
 //
-// A last line that could still become the fence — "```apex" with the rest of
-// the tag yet to arrive — is held back too, or it would flash on screen for
-// one token and vanish on the next.
-func VisibleReply(partial string) (visible string, drafting bool) {
+// A last line that could still become a fence — "```apex" with the rest of the
+// tag yet to arrive — is held back too, or it would flash on screen for one
+// token and vanish on the next.
+func VisibleReply(partial string) (visible string, drafting string) {
 	lines := strings.Split(partial, "\n")
 	for i, line := range lines {
-		if isProposalFence(strings.TrimSpace(line)) {
-			return strings.Join(lines[:i], "\n"), true
+		switch fenceTag(strings.TrimSpace(line), []string{ProposalFence, IdeaFence}) {
+		case ProposalFence:
+			return strings.Join(lines[:i], "\n"), "action items"
+		case IdeaFence:
+			return strings.Join(lines[:i], "\n"), "project ideas"
 		}
 	}
 	last := strings.TrimSpace(lines[len(lines)-1])
-	if strings.HasPrefix(last, "```") && strings.HasPrefix("```"+ProposalFence, last) {
-		return strings.Join(lines[:len(lines)-1], "\n"), false
+	if strings.HasPrefix(last, "```") &&
+		(strings.HasPrefix("```"+ProposalFence, last) || strings.HasPrefix("```"+IdeaFence, last)) {
+		return strings.Join(lines[:len(lines)-1], "\n"), ""
 	}
-	return partial, false
+	return partial, ""
 }
 
-func isProposalFence(trimmed string) bool {
+// fenceTag returns which of tags a fence line opens, or "".
+func fenceTag(trimmed string, tags []string) string {
 	rest, ok := strings.CutPrefix(trimmed, "```")
-	return ok && strings.TrimSpace(rest) == ProposalFence
+	if !ok {
+		return ""
+	}
+	rest = strings.TrimSpace(rest)
+	for _, t := range tags {
+		if rest == t {
+			return t
+		}
+	}
+	return ""
 }
 
 // capProposals drops untitled proposals and bounds the rest.

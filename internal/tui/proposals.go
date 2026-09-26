@@ -78,6 +78,9 @@ type recordedMsg struct {
 type contextReloadedMsg struct {
 	actx *advisor.Context
 	err  error
+	// quiet reloads say nothing in the scrollback: they follow something
+	// the chat already reported, such as a project it just created.
+	quiet bool
 }
 
 // openProposal puts a checklist in front of the user, with every item that
@@ -105,9 +108,7 @@ func (m *Model) openProposal(items []advisor.ProposedItem, model string) {
 // closeProposal ends the checklist's hold on the keyboard.
 func (m *Model) closeProposal() {
 	m.chat.proposal = nil
-	if m.view == viewChat {
-		m.chat.ta.Focus()
-	}
+	m.focusInput()
 }
 
 // touchProposal re-renders the checklist after its state changed. Turns cache
@@ -301,6 +302,16 @@ func (m *Model) reloadContextCmd() tea.Cmd {
 	}
 }
 
+// reloadContextQuietlyCmd is reloadContextCmd without the announcement.
+func (m *Model) reloadContextQuietlyCmd() tea.Cmd {
+	load := m.reloadContextCmd()
+	return func() tea.Msg {
+		msg := load().(contextReloadedMsg)
+		msg.quiet = true
+		return msg
+	}
+}
+
 func (m *Model) contextReloaded(msg contextReloadedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.setStatus("could not reload context: "+msg.err.Error(), statusError)
@@ -311,6 +322,9 @@ func (m *Model) contextReloaded(msg contextReloadedMsg) (tea.Model, tea.Cmd) {
 		m.chat.sess.SetContext(msg.actx)
 	} else {
 		m.chat.sess = m.opts.Advisor.NewChat(msg.actx)
+	}
+	if msg.quiet {
+		return m, nil
 	}
 	m.chat.say(roleSystem, "Reloaded. "+m.welcome(msg.actx))
 	m.rerenderChat()

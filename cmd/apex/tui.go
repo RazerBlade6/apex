@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
+	"time"
 
+	"github.com/RazerBlade6/apex/internal/advisor"
+	"github.com/RazerBlade6/apex/internal/store"
 	"github.com/RazerBlade6/apex/internal/tui"
 )
 
@@ -29,14 +34,15 @@ func runTUI(ctx context.Context, in io.Reader, out io.Writer) error {
 	defer sess.Close()
 
 	return tui.Run(ctx, tui.Options{
-		Store:    sess.Store,
-		Config:   sess.Config,
-		Advisor:  sess.advisorFor(),
-		Root:     sess.Root,
-		Version:  version,
-		Dispatch: dispatcherFor(sess),
-		Input:    in,
-		Output:   out,
+		Store:     sess.Store,
+		Config:    sess.Config,
+		Advisor:   sess.advisorFor(),
+		Root:      sess.Root,
+		Version:   version,
+		Dispatch:  dispatcherFor(sess),
+		StartIdea: ideaStarterFor(sess),
+		Input:     in,
+		Output:    out,
 	})
 }
 
@@ -56,5 +62,78 @@ func dispatcherFor(sess *session) tui.Dispatcher {
 		return dispatchItem(ctx, w, sess, itemID, dispatchOptions{
 			Timeout: defaultDispatchTimeout,
 		})
+	}
+}
+
+// ideaStarterFor turns an idea the user settled on in the chat into a project
+// and its first action item.
+//
+// It records the idea, as `apex ideas` would have, then runs createProject —
+// `apex start` short of the agent — and adds the scaffolding item to the new
+// project. The agent pass that `apex start` would have run is exactly what
+// dispatching that item does, so nothing is lost by stopping short: the user
+// dispatches it from the items view when they are ready to spend the quota.
+func ideaStarterFor(sess *session) tui.IdeaStarter {
+	return func(ctx context.Context, w io.Writer, plan *advisor.IdeaPlan) (tui.IdeaStarted, error) {
+		now := time.Now()
+		id, err := sess.Store.NextIdeaID(ctx)
+		if err != nil {
+			return tui.IdeaStarted{}, err
+		}
+		idea := store.Idea{
+			ID:          id,
+			Title:       plan.Name,
+			Pitch:       strings.TrimSpace(plan.Pitch),
+			Rationale:   strings.TrimSpace(plan.Rationale),
+			Status:      store.IdeaSaved,
+			CreatedAt:   now,
+			GeneratedBy: plan.Model,
+		}
+
+		opts := startOptions{Name: plan.Name, NoDispatch: true}
+		if _, ok := scaffolderFor(plan.Stack); ok {
+			opts.Stack = plan.Stack
+		}
+
+		// Everything that can refuse is checked before anything is written,
+		// so a name that is taken leaves no orphaned idea behind it.
+		if err := preflightProject(ctx, sess, idea, opts); err != nil {
+			return tui.IdeaStarted{}, err
+		}
+		if err := sess.Store.InsertIdea(ctx, idea); err != nil {
+			return tui.IdeaStarted{}, err
+		}
+		created, err := createProject(ctx, w, sess, idea, opts)
+		if err != nil {
+			return tui.IdeaStarted{}, err
+		}
+
+		itemID, err := sess.Store.NextActionItemID(ctx)
+		if err != nil {
+			return tui.IdeaStarted{}, err
+		}
+		body := strings.TrimSpace(plan.Item.Body)
+		if created.Scaffold.Ran && created.Scaffold.Err == nil {
+			body += fmt.Sprintf("\n\n`%s` has already run in this directory. Extend what it produced; "+
+				"do not replace or duplicate it.", created.Scaffold.Command)
+		}
+		item := store.ActionItem{
+			ID:          itemID,
+			ProjectSlug: created.Slug,
+			Title:       strings.TrimSpace(plan.Item.Title),
+			Body:        body,
+			Rationale:   strings.TrimSpace(plan.Item.Rationale),
+			Effort:      plan.Item.Effort,
+			// Accepted rather than proposed: the user has already been
+			// through the questionnaire and said yes to this exact item.
+			Status:      store.ItemAccepted,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			GeneratedBy: plan.Model,
+		}
+		if err := sess.Store.InsertActionItem(ctx, item); err != nil {
+			return tui.IdeaStarted{}, err
+		}
+		return tui.IdeaStarted{ProjectName: created.Name, Dir: created.Dir, Item: item}, nil
 	}
 }

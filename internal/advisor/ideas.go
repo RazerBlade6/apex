@@ -39,10 +39,13 @@ Ideas already on the backlog, which you must NOT propose again:
 const maxIdeas = 5
 
 type ideasResponse struct {
-	Ideas []proposedIdea `json:"ideas"`
+	Ideas []ProposedIdea `json:"ideas"`
 }
 
-type proposedIdea struct {
+// ProposedIdea is one project idea as a model proposed it, before it is
+// recorded. `apex ideas` records every one; the chat records only the one the
+// user picks and settles.
+type ProposedIdea struct {
 	Title     string `json:"title"`
 	Pitch     string `json:"pitch"`
 	Rationale string `json:"rationale"`

@@ -99,7 +99,7 @@ target. See [known limitations](#status-and-known-limitations).
 ### Run the tests
 
 ```sh
-go test ./...              # 262 tests, entirely offline — no API calls, no cost
+go test ./...              # 271 tests, entirely offline — no API calls, no cost
 go test -race ./...        # concurrency checks
 ```
 
@@ -187,8 +187,12 @@ interface with three views on `tab`:
   streamed and rendered as markdown. When a conversation lands on concrete work, Apex
   proposes action items as a checklist under its reply; `y` adds the ticked ones to
   Items, ready to dispatch, and `n` discards them. Nothing is recorded until you answer.
-  `/items` turns the conversation so far into proposals on demand, and `/reload` picks
-  up projects started or synced in another terminal
+  Ask it for project ideas (or type `/ideas`) and they arrive as a list to pick from;
+  pick one and Apex describes it in more depth and asks a few questions, answered in the
+  input box; then `y` creates the project — directory, git, `PROJECT.md`, a `PROJECTS.md`
+  entry — and puts its first action item in Items. `/items` turns the conversation so far
+  into proposals on demand, and `/reload` picks up projects started or synced in another
+  terminal
 - **Items** — action items as cards grouped by project, with the selected item's project on
   the left and its full detail on the right; filtered with `f`, dispatched with `enter`
 - **Projects** — the registry with digest previews and staleness indicators

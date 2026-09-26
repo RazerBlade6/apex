@@ -202,18 +202,19 @@ func TestVisibleReplyHidesTheBlockWhileItStreams(t *testing.T) {
 	tests := []struct {
 		partial      string
 		wantVisible  string
-		wantDrafting bool
+		wantDrafting string
 	}{
-		{"Plain prose.", "Plain prose.", false},
-		{"Two items.\n```apex-items\n{\"items\":[", "Two items.", true},
-		{"Two items.\n```ape", "Two items.", false},
-		{"Two items.\n```", "Two items.", false},
-		{"Run:\n```sh", "Run:\n```sh", false},
+		{"Plain prose.", "Plain prose.", ""},
+		{"Two items.\n```apex-items\n{\"items\":[", "Two items.", "action items"},
+		{"Three ideas.\n```apex-ideas\n{\"ideas\":[", "Three ideas.", "project ideas"},
+		{"Two items.\n```ape", "Two items.", ""},
+		{"Two items.\n```", "Two items.", ""},
+		{"Run:\n```sh", "Run:\n```sh", ""},
 	}
 	for _, tt := range tests {
 		visible, drafting := VisibleReply(tt.partial)
 		if visible != tt.wantVisible || drafting != tt.wantDrafting {
-			t.Errorf("VisibleReply(%q) = %q, %v; want %q, %v",
+			t.Errorf("VisibleReply(%q) = %q, %q; want %q, %q",
 				tt.partial, visible, drafting, tt.wantVisible, tt.wantDrafting)
 		}
 	}

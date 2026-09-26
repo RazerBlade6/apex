@@ -133,57 +133,11 @@ func runStart(ctx context.Context, w io.Writer, rawID string, opts startOptions)
 		return err
 	}
 
-	name := strings.TrimSpace(opts.Name)
-	if name == "" {
-		name = idea.Title
-	}
-	slug := project.Slug(name)
-	if slug == "" {
-		return &badProjectNameError{Name: name}
-	}
-
-	home, err := project.Home()
+	created, err := createProject(ctx, w, sess, idea, opts)
 	if err != nil {
 		return err
 	}
-	dir := strings.TrimSpace(opts.Path)
-	if dir == "" {
-		dir = filepath.Join(home, defaultProjectParent, name)
-	} else if dir, err = project.ExpandPath(dir, home); err != nil {
-		return err
-	}
-
-	// Before anything is created: the project has to be registrable under
-	// this name at this path, or it would be made and then never found.
-	if err := checkRegistrable(ctx, sess, name, slug, dir, home); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(w, "%s  %s\n", idea.ID, idea.Title)
-	fmt.Fprintf(w, "creating %s\n\n", dir)
-
-	// --- tier 1a: the directory --------------------------------------------
-	if err := makeProjectDir(dir); err != nil {
-		return err
-	}
-
-	// --- tier 2: the ecosystem's own scaffolder ----------------------------
-	// It runs before the file writes so it meets an empty directory; see the
-	// note at the top of this file.
-	scaffold := runTierTwo(ctx, w, dir, slug, opts, idea)
-
-	// --- tier 1b: git, PROJECT.md, .gitignore, the registry ----------------
-	if err := tierOne(ctx, w, sess, dir, name, slug, idea, scaffold); err != nil {
-		return err
-	}
-
-	// The idea is now a project, whether or not tier 3 runs. Recording it
-	// here rather than after the dispatch means a failed or skipped agent
-	// pass does not leave the idea looking unstarted while its directory
-	// exists.
-	if err := sess.Store.SetIdeaStatus(ctx, idea.ID, store.IdeaStarted, slug); err != nil {
-		return err
-	}
+	name, slug, dir, scaffold := created.Name, created.Slug, created.Dir, created.Scaffold
 
 	// --- tier 3: the executor ----------------------------------------------
 	if opts.NoDispatch {
@@ -212,6 +166,97 @@ func runStart(ctx context.Context, w io.Writer, rawID string, opts startOptions)
 	}
 	writeStartNextSteps(w, dir, name)
 	return nil
+}
+
+// createdProject is what tiers 1 and 2 produced.
+type createdProject struct {
+	Name, Slug, Dir string
+	Scaffold        scaffoldResult
+}
+
+// createProject is `apex start` short of the agent: the directory, the
+// ecosystem scaffolder, git, PROJECT.md, .gitignore, the PROJECTS.md entry and
+// the projects row, and the idea marked started. Nothing in it calls a model.
+//
+// It is shared with the chat, which turns an idea the user settled on into a
+// project and a scaffolding action item: the item needs a project row to belong
+// to, and this is the one place a project row is made from an idea.
+func createProject(ctx context.Context, w io.Writer, sess *session, idea store.Idea, opts startOptions) (*createdProject, error) {
+	name, slug, dir, err := projectTarget(idea, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := preflightProject(ctx, sess, idea, opts); err != nil {
+		return nil, err
+	}
+
+	fmt.Fprintf(w, "%s  %s\n", idea.ID, idea.Title)
+	fmt.Fprintf(w, "creating %s\n\n", dir)
+
+	// --- tier 1a: the directory --------------------------------------------
+	if err := makeProjectDir(dir); err != nil {
+		return nil, err
+	}
+
+	// --- tier 2: the ecosystem's own scaffolder ----------------------------
+	// It runs before the file writes so it meets an empty directory; see the
+	// note at the top of this file.
+	scaffold := runTierTwo(ctx, w, dir, slug, opts, idea)
+
+	// --- tier 1b: git, PROJECT.md, .gitignore, the registry ----------------
+	if err := tierOne(ctx, w, sess, dir, name, slug, idea, scaffold); err != nil {
+		return nil, err
+	}
+
+	// The idea is now a project, whether or not tier 3 runs. Recording it
+	// here rather than after the dispatch means a failed or skipped agent
+	// pass does not leave the idea looking unstarted while its directory
+	// exists.
+	if err := sess.Store.SetIdeaStatus(ctx, idea.ID, store.IdeaStarted, slug); err != nil {
+		return nil, err
+	}
+	return &createdProject{Name: name, Slug: slug, Dir: dir, Scaffold: scaffold}, nil
+}
+
+// projectTarget is the name, slug and directory a start would use.
+func projectTarget(idea store.Idea, opts startOptions) (name, slug, dir string, err error) {
+	name = strings.TrimSpace(opts.Name)
+	if name == "" {
+		name = idea.Title
+	}
+	slug = project.Slug(name)
+	if slug == "" {
+		return "", "", "", &badProjectNameError{Name: name}
+	}
+	home, err := project.Home()
+	if err != nil {
+		return "", "", "", err
+	}
+	dir = strings.TrimSpace(opts.Path)
+	if dir == "" {
+		dir = filepath.Join(home, defaultProjectParent, name)
+	} else if dir, err = project.ExpandPath(dir, home); err != nil {
+		return "", "", "", err
+	}
+	return name, slug, dir, nil
+}
+
+// preflightProject checks, before anything is created, that the project can
+// be made here and registered under this name — or it would be made and then
+// never found.
+func preflightProject(ctx context.Context, sess *session, idea store.Idea, opts startOptions) error {
+	name, slug, dir, err := projectTarget(idea, opts)
+	if err != nil {
+		return err
+	}
+	if err := checkEmptyDir(dir); err != nil {
+		return err
+	}
+	home, err := project.Home()
+	if err != nil {
+		return err
+	}
+	return checkRegistrable(ctx, sess, name, slug, dir, home)
 }
 
 // runTierTwo chooses and runs the ecosystem scaffolder, reporting either way.
@@ -512,6 +557,20 @@ func makeProjectDir(dir string) error {
 	default:
 		return nil
 	}
+}
+
+// checkEmptyDir is makeProjectDir's refusal, without creating anything.
+func checkEmptyDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("read %s: %w", dir, err)
+	case len(entries) > 0:
+		return &occupiedDirError{Path: dir, Entries: len(entries)}
+	}
+	return nil
 }
 
 func isGitRepo(dir string) bool {
