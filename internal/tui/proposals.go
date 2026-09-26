@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -54,8 +56,17 @@ type proposal struct {
 // by its pointer: a call the user cancelled can still deliver its result, and
 // if they have asked again since, that result must not be taken for the new
 // one's.
+//
+// The same slot holds `/review` and `/sync`, which are the same shape: one
+// long call the user can stop with esc, during which the chat takes no new
+// message. label is what the chat says while it runs.
 type proposeRun struct {
 	cancel context.CancelFunc
+	label  string
+	// empty is said when a proposing run comes back with nothing, and failed
+	// prefixes its error.
+	empty  string
+	failed string
 }
 
 // proposalsMsg carries the result of `/items` back from proposeCmd.
@@ -246,17 +257,100 @@ func (m *Model) recorded(msg recordedMsg) (tea.Model, tea.Cmd) {
 // proposeCmd is `/items`: the conversation so far, as action items.
 func (m *Model) proposeCmd() tea.Cmd {
 	sess := m.chat.sess
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	run := &proposeRun{cancel: cancel}
-	m.chat.proposing = run
+	ctx, run := m.startRun(5*time.Minute, proposeRun{
+		label:  "turning the conversation into action items",
+		empty:  "Nothing in this conversation is concrete enough to be an action item yet.",
+		failed: "could not propose action items",
+	})
 	return func() tea.Msg {
-		defer cancel()
+		defer run.cancel()
 		props, err := sess.ProposeItems(ctx)
 		return proposalsMsg{run: run, props: props, err: err}
 	}
 }
 
-// cancelProposing stops an `/items` call in flight, if there is one.
+// reviewCmd is `/review`: `apex review`'s call, over the whole portfolio and
+// on the advisor route, with its result shown as a checklist rather than
+// written straight to the table. In the chat nothing is recorded until the
+// user says so, and a review is no exception.
+func (m *Model) reviewCmd() tea.Cmd {
+	adv, actx := m.opts.Advisor, m.chat.actx
+	ctx, run := m.startRun(10*time.Minute, proposeRun{
+		label:  "reviewing the portfolio",
+		empty:  "The review found nothing new to propose.",
+		failed: "could not review the portfolio",
+	})
+	return func() tea.Msg {
+		defer run.cancel()
+		props, err := adv.ReviewProposals(ctx, actx)
+		return proposalsMsg{run: run, props: props, err: err}
+	}
+}
+
+// Syncer runs `apex sync`, writing its report to w. It is a callback for the
+// same reason Dispatcher is: sync is registry, lock and migration work that
+// lives in cmd/apex. An error returned alongside a written report means the
+// sync ran and found problems the report names.
+type Syncer func(ctx context.Context, w io.Writer) error
+
+// syncedMsg carries a finished `/sync` back.
+type syncedMsg struct {
+	run    *proposeRun
+	report string
+	err    error
+}
+
+// syncCmd is `/sync`: the registry re-read and stale digests regenerated,
+// exactly as `apex sync` would, with the report printed in the chat.
+func (m *Model) syncCmd() tea.Cmd {
+	sync := m.opts.Sync
+	ctx, run := m.startRun(30*time.Minute, proposeRun{
+		label:  "syncing the registry and digests",
+		failed: "could not sync",
+	})
+	return func() tea.Msg {
+		defer run.cancel()
+		var out bytes.Buffer
+		err := sync(ctx, &out)
+		return syncedMsg{run: run, report: out.String(), err: err}
+	}
+}
+
+// synced shows the report and reloads everything a sync can change: the
+// context the chat reasons over, the items and the projects.
+func (m *Model) synced(msg syncedMsg) (tea.Model, tea.Cmd) {
+	if msg.run != m.chat.proposing {
+		return m, nil
+	}
+	m.chat.proposing = nil
+	report := strings.TrimSpace(msg.report)
+	if report != "" {
+		m.chat.say(roleReport, report)
+	}
+	switch {
+	case msg.err != nil && report == "":
+		m.chat.say(roleSystem, msg.run.failed+": "+msg.err.Error())
+		m.setStatus(firstLine(msg.err.Error()), statusError)
+		m.rerenderChat()
+		return m, nil
+	case msg.err != nil:
+		m.setStatus("sync found problems — the report above names them", statusWarn)
+	default:
+		m.setStatus("synced", statusNeutral)
+	}
+	m.rerenderChat()
+	return m, m.reloadContextCmd()
+}
+
+// startRun opens the slot for one long call.
+func (m *Model) startRun(timeout time.Duration, run proposeRun) (context.Context, *proposeRun) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	run.cancel = cancel
+	m.chat.proposing = &run
+	return ctx, &run
+}
+
+// cancelProposing stops an `/items`, `/review` or `/sync` in flight, if there is one.
 func (m *Model) cancelProposing() {
 	if m.chat.proposing == nil {
 		return
@@ -273,13 +367,13 @@ func (m *Model) proposed(msg proposalsMsg) (tea.Model, tea.Cmd) {
 	}
 	m.chat.proposing = nil
 	if msg.err != nil {
-		m.chat.say(roleSystem, "could not propose action items: "+msg.err.Error())
-		m.setStatus(msg.err.Error(), statusError)
+		m.chat.say(roleSystem, msg.run.failed+": "+msg.err.Error())
+		m.setStatus(firstLine(msg.err.Error()), statusError)
 		m.rerenderChat()
 		return m, nil
 	}
 	if len(msg.props.Items) == 0 {
-		m.chat.say(roleSystem, "Nothing in this conversation is concrete enough to be an action item yet.")
+		m.chat.say(roleSystem, msg.run.empty)
 		m.setStatus(describeUsage(msg.props.Usage), statusNeutral)
 		m.rerenderChat()
 		return m, nil

@@ -49,6 +49,9 @@ const (
 	// roleIdeas is a list of project ideas to pick from (ideas.go), drawn
 	// from ideas.
 	roleIdeas = "apex ✦"
+	// roleReport is a command's report, `/sync`'s table: preformatted, so it
+	// is truncated to the pane rather than wrapped.
+	roleReport = "apex ≡"
 	// roleQuestion is a question Apex needs answered: the questionnaire,
 	// and whether to make an idea an action item.
 	roleQuestion = "apex ?"
@@ -88,7 +91,8 @@ type chatState struct {
 	// proposal is the checklist awaiting an answer, if there is one. While
 	// it is open it has the keyboard.
 	proposal *proposal
-	// proposing is the `/items` call in flight; nil when there is none.
+	// proposing is the `/items`, `/review` or `/sync` in flight; nil when
+	// there is none.
 	proposing *proposeRun
 	// idea is the project-ideas flow, from a list to an action item; nil
 	// when there is none.
@@ -303,7 +307,7 @@ func (m *Model) rerenderChat() {
 		block(&out, partial.String())
 	}
 	if m.chat.proposing != nil {
-		block(&out, styleDim.Render(indentBlock("turning the conversation into action items…", glamourMargin)))
+		block(&out, styleDim.Render(indentBlock(m.chat.proposing.label+"…", glamourMargin)))
 	}
 	if f := m.chat.idea; f != nil {
 		var working string
@@ -357,6 +361,19 @@ func (m *Model) renderTurn(t chatTurn) string {
 		return m.renderProposal(t.prop)
 	case roleIdeas:
 		return m.renderIdeas(t.ideas)
+	case roleReport:
+		width := m.replyWidth()
+		if two {
+			width -= glamourMargin
+		}
+		lines := strings.Split(t.body, "\n")
+		for i, l := range lines {
+			lines[i] = styleDim.Render(truncate(strings.ReplaceAll(l, "\t", "    "), width))
+		}
+		if two {
+			return indentBlock(strings.Join(lines, "\n"), glamourMargin)
+		}
+		return strings.Join(lines, "\n")
 	case roleQuestion:
 		if two {
 			return indentBlock(fitStyled(t.body, m.replyWidth()-glamourMargin, styleLabel), glamourMargin)
@@ -387,7 +404,7 @@ func (m *Model) chatHint() string {
 		return "streaming — esc to stop"
 	}
 	if m.chat.proposing != nil {
-		return "proposing action items — esc to stop"
+		return m.chat.proposing.label + " — esc to stop"
 	}
 	if m.chat.idea != nil {
 		return m.ideaHint()
@@ -477,6 +494,9 @@ func (m *Model) updateChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case contextReloadedMsg:
 		return m.contextReloaded(msg)
+
+	case syncedMsg:
+		return m.synced(msg)
 
 	case ideasProposedMsg:
 		return m.ideasProposed(msg)
@@ -582,7 +602,7 @@ func (m *Model) send() tea.Cmd {
 		return nil
 	}
 	if m.chat.proposing != nil {
-		m.setStatus("still proposing action items — esc to stop", statusWarn)
+		m.setStatus("still "+m.chat.proposing.label+" — esc to stop", statusWarn)
 		return nil
 	}
 	if m.chat.sess == nil {
@@ -626,6 +646,8 @@ func (m *Model) send() tea.Cmd {
 // chatCommands is what `/help` lists.
 const chatCommands = `/ideas   suggest new projects to pick from and turn into an action item
 /items   turn this conversation into action items to approve
+/review  review the whole portfolio, as apex review does, and approve what it proposes
+/sync    refresh PROJECTS.md and regenerate stale digests, as apex sync does
 /reload  re-read your profile, digests and PROJECTS.md — after an apex start or sync elsewhere
 /help    this list`
 
@@ -645,6 +667,18 @@ func (m *Model) chatCommand(input string) tea.Cmd {
 		return cmd
 	case "/ideas":
 		cmd := m.ideasCmd()
+		m.rerenderChat()
+		return cmd
+	case "/review":
+		cmd := m.reviewCmd()
+		m.rerenderChat()
+		return cmd
+	case "/sync":
+		if m.opts.Sync == nil {
+			m.setStatus("sync is not available in this build", statusWarn)
+			return nil
+		}
+		cmd := m.syncCmd()
 		m.rerenderChat()
 		return cmd
 	case "/reload":

@@ -86,7 +86,7 @@ func pump(t *testing.T, m *Model, cmd tea.Cmd) {
 		}
 	case streamEventMsg, recordedMsg, proposalsMsg, contextReloadedMsg, contextLoadedMsg,
 		itemsLoadedMsg, projectsLoadedMsg, observedMsg,
-		ideasProposedMsg, ideaExploredMsg, ideaCreatedMsg:
+		ideasProposedMsg, ideaExploredMsg, ideaCreatedMsg, syncedMsg:
 		_, next := m.Update(msg)
 		pump(t, m, next)
 	}

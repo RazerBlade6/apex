@@ -320,6 +320,15 @@ func runSync(ctx context.Context, only string, dryRun bool) (*syncReport, error)
 		return nil, err
 	}
 	defer sess.Close()
+	return syncWith(ctx, sess, only, dryRun)
+}
+
+// syncWith is runSync against a session the caller already opened: the TUI's
+// `/sync`, which holds one store open for its whole lifetime and should not
+// open a second writer on the same file for the length of a sync. That session
+// was opened without migrating, which is fine — it refused to open at all if a
+// migration was pending.
+func syncWith(ctx context.Context, sess *session, only string, dryRun bool) (*syncReport, error) {
 	root, cfg, st := sess.Root, sess.Config, sess.Store
 
 	home, err := project.Home()

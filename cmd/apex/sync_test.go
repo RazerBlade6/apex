@@ -791,3 +791,25 @@ func assertUserFixable(t *testing.T, err error) {
 		t.Errorf("err %T (%v) is not reported as user-fixable", err, err)
 	}
 }
+
+// TestChatSyncerWritesTheReport: the TUI's `/sync` runs the real sync on the
+// session the TUI already holds, and writes the report `apex sync` prints.
+func TestChatSyncerWritesTheReport(t *testing.T) {
+	f := newFixture(t)
+	seedReviewableProject(t, f)
+	sess, err := openSession(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	var out bytes.Buffer
+	if err := syncerFor(sess)(context.Background(), &out); err != nil {
+		t.Fatalf("syncer: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"registry:", "Atlas"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the report does not mention %q:\n%s", want, out.String())
+		}
+	}
+}

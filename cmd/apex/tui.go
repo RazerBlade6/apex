@@ -41,6 +41,7 @@ func runTUI(ctx context.Context, in io.Reader, out io.Writer) error {
 		Version:   version,
 		Dispatch:  dispatcherFor(sess),
 		StartIdea: ideaStarterFor(sess),
+		Sync:      syncerFor(sess),
 		Input:     in,
 		Output:    out,
 	})
@@ -135,5 +136,24 @@ func ideaStarterFor(sess *session) tui.IdeaStarter {
 			return tui.IdeaStarted{}, err
 		}
 		return tui.IdeaStarted{ProjectName: created.Name, Dir: created.Dir, Item: item}, nil
+	}
+}
+
+// syncerFor adapts `apex sync` to the callback the TUI's `/sync` takes. It
+// writes the same report the command prints, and returns errSyncProblems when
+// the command would have exited non-zero.
+func syncerFor(sess *session) tui.Syncer {
+	return func(ctx context.Context, w io.Writer) error {
+		report, err := syncWith(ctx, sess, "", false)
+		if err != nil {
+			return err
+		}
+		if err := report.write(w); err != nil {
+			return err
+		}
+		if report.failed() {
+			return errSyncProblems
+		}
+		return nil
 	}
 }

@@ -87,24 +87,49 @@ type ReviewResult struct {
 // Deduplication happens in Go rather than by asking the model nicely; see
 // record, which RecordItems shares.
 func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, error) {
+	props, existing, err := a.reviewCall(ctx, actx)
+	if err != nil {
+		return nil, err
+	}
+	result, err := a.record(ctx, actx, props.Items, props.Model, existing)
+	if err != nil {
+		return nil, err
+	}
+	result.Usage = props.Usage
+	return result, nil
+}
+
+// ReviewProposals is the review call without the write: the chat's `/review`
+// shows the result as a checklist, and RecordItems writes what the user ticks.
+// The prompt, the route and the model are exactly `apex review`'s; only when
+// the rows are written differs.
+func (a *Advisor) ReviewProposals(ctx context.Context, actx *Context) (*Proposals, error) {
+	props, _, err := a.reviewCall(ctx, actx)
+	return props, err
+}
+
+// reviewCall is the model half of a review. It returns the open items it
+// deduplicated the prompt against, so Review can deduplicate the result
+// against the same list without reading it twice.
+func (a *Advisor) reviewCall(ctx context.Context, actx *Context) (*Proposals, []store.ActionItem, error) {
 	if len(actx.Digests) == 0 {
-		return nil, ErrNoDigests
+		return nil, nil, ErrNoDigests
 	}
 
 	existing, err := a.Store.ListActionItems(ctx, store.ActionItemFilter{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	schema, err := schemaBytes(actionItemsSchema)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	route := a.Config.Models.Advisor
 	p, err := a.providerFor(ctx, route)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	instruction := fmt.Sprintf(reviewInstructions, maxReviewItems, renderOpenItems(existing))
@@ -113,7 +138,7 @@ func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, err
 	var decoded reviewResponse
 	usage, err := p.Structured(ctx, req, schema, &decoded)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// The serving model, not the route's alias. M4 could only record what it
@@ -125,13 +150,7 @@ func (a *Advisor) Review(ctx context.Context, actx *Context) (*ReviewResult, err
 	if model == "" {
 		model = route.Model
 	}
-
-	result, err := a.record(ctx, actx, decoded.Items, model, existing)
-	if err != nil {
-		return nil, err
-	}
-	result.Usage = usage
-	return result, nil
+	return &Proposals{Items: decoded.Items, Usage: usage, Model: model}, existing, nil
 }
 
 // RecordItems writes proposed action items the way `apex review` does:

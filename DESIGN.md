@@ -1323,6 +1323,15 @@ what is displayed, and kept in the history so the next turn knows what it
 proposed. The chat prompt lists the open items on every turn, because an item
 approved three turns ago is one the model must not propose again.
 
+**`/review` and `/sync` run the commands.** `/review` makes exactly `apex review`'s
+call — the advisor route, the whole portfolio, the same prompt — but shows the result
+as the chat's checklist instead of writing it, because in the chat nothing is recorded
+until the user says so (`Advisor.ReviewProposals` is `Review` without the write).
+`/sync` is `apex sync` itself, reached through a `Syncer` callback like dispatch, run
+on the session the TUI already holds rather than a second writer on the same file; its
+report is printed in the chat, and the context the chat reasons over is reloaded after
+it.
+
 **The chat turns a project idea into a project.** `apex ideas` records every idea
 and leaves the user to `apex start` one; the chat is where the choosing happens, so
 it records nothing until the choice is made. Ideas arrive in an `apex-ideas` block

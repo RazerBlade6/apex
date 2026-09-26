@@ -62,6 +62,8 @@ type Options struct {
 	// StartIdea creates the project a chosen idea became, and its first
 	// action item. Nil disables that last step and the chat says so.
 	StartIdea IdeaStarter
+	// Sync runs `apex sync` for the chat's `/sync`. Nil disables it.
+	Sync Syncer
 	// Version is shown in the header.
 	Version string
 
@@ -219,7 +221,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// "loading…" forever with no error anywhere. The same applies to a stream
 	// or a dispatch the user tabbed away from mid-flight.
 	case contextLoadedMsg, streamEventMsg, observedMsg, proposalsMsg, recordedMsg, contextReloadedMsg,
-		ideasProposedMsg, ideaExploredMsg, ideaCreatedMsg:
+		ideasProposedMsg, ideaExploredMsg, ideaCreatedMsg, syncedMsg:
 		return m.updateChat(msg)
 	case itemsLoadedMsg, dispatchLineMsg, dispatchDoneMsg, gitStateMsg:
 		return m.updateItems(msg)
